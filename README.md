@@ -52,12 +52,11 @@ curl -s localhost:8791/v1/judge -H 'content-type: application/json' -d '{
     "team":   {"kind": "pick", "pick": "billing", "probs": {"billing": 0.9997, "technical": 0.0002, "sales": 0.0001}, "confidence": 0.9975},
     "anger":  {"kind": "scale", "value": 1.647, "probs": [0.0027, 0.3477, 0.6496], "confidence": 0.3963}
   },
-  "usage": {"prompt_tokens": 465, "completion_tokens": 3, "backend_calls": 3},
-  "latency_ms": 621
+  "usage": {"prompt_tokens": 465, "completion_tokens": 3, "backend_calls": 3}
 }
 ```
 
-That's a real response from Qwen3.5-397B. `p_yes` is 0.59 because the customer reports a double charge but never
+That's a real response from Qwen3.5-397B (lightly trimmed). `p_yes` is 0.59 because the customer reports a double charge but never
 explicitly asks for money back. Hunch reports that uncertainty instead of guessing, and your code decides what 0.59 means.
 
 ## API
@@ -160,8 +159,8 @@ From the bundled benchmark (see [Measured](#measured)):
 - **Most accurate:** a large instruct model (Qwen3.5-397B: 100%). Use it for decisions where errors are costly.
 - **Best calibrated per GPU:** a mid-size dense model (Gemma-4-31B: 98.8%, calibration error 0.013). Its
   probabilities are the most trustworthy as probabilities, and it's light enough to run next to other workloads.
-- **Edge / lowest latency per check:** a small MoE (Qwen3.6-35B-A3B, 4-bit, on a Jetson AGX Orin: 99.6%, ~230 ms per
-  check). Best when each request asks only a few checks.
+- **Edge:** a small MoE (Qwen3.6-35B-A3B, 4-bit, on a Jetson AGX Orin: 99.6%). It fits on edge hardware and
+  suits requests that ask only a few checks.
 - **Position-biased models** (DeepSeek-V4-Flash here) work with `debias = true`, at twice the calls.
 - **Avoid models that stay indecisive when constrained.** GLM-5.3 kept `p_yes` between 0.1 and 0.6 and never cleared a
   0.9 gate. Run `python -m hunch selftest` and `python bench/bench.py accuracy <model>` before adopting a model.
@@ -212,14 +211,7 @@ two runs per model, with yes counted at `p_yes ≥ 0.9`. Results on vLLM with NV
 | Qwen3.6-35B-A3B (AWQ int4, on a Jetson AGX Orin) | 99.6 | 1.000 | 0.055 | 0.116 | 0.263 |
 | GLM-5.3 | 66.7: constrained but indecisive (p_yes stuck at 0.1–0.6) | | | | |
 
-Fan-out on Qwen3.5 at the default concurrency of 16: 1 check 570 ms, 10 checks 740 ms, 50 checks 2.4 s,
-100 checks 4.0 s, a 100-option pick 730 ms.
-
-On the Jetson, Qwen3.6-35B-A3B answers a single check in about **230 ms**, but it has less parallel throughput
-(concurrency 8): 10 checks take 1.2 s, 100 checks 9.2 s, and a 100-option pick 1.6 s. It's a good fit for
-few-checks-per-request gates on edge hardware.
-
-These are one synthetic task on one cluster. **Measure on your own labelled cases** before a decision depends on
+These are results for one synthetic task on our hardware. **Measure on your own labelled cases** before a decision depends on
 Hunch: `python bench/bench.py accuracy <model>` shows how.
 
 ## Writing good checks
