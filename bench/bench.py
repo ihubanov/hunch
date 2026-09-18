@@ -1,10 +1,12 @@
 """Benchmarks against a running Hunch (default http://127.0.0.1:8791, override with HUNCH_URL).
 
-  python bench/bench.py accuracy [model ...]   # 240 labelled look-alike pairs, 2 runs per model
+  python bench/bench.py accuracy [--vague] [model ...]   # 240 labelled look-alike pairs, 2 runs per model
   python bench/bench.py fanout   [model]       # latency vs number of checks and big picks
 
 Accuracy is measured at the 0.9 gate (a yes/no answer counts as "yes" when p_yes >= 0.9), plus
 AUROC, Brier score, expected calibration error (ECE), run-to-run drift and latency.
+--vague sends only each check's `question`, without `yes_if` / `no_if`, to show what naming the look-alike
+cases in the definitions is worth.
 """
 import asyncio
 import collections
@@ -42,8 +44,10 @@ def ece(pairs, bins=10):
     return sum(len(b) / len(pairs) * abs(statistics.mean(p for p, _ in b) - statistics.mean(y for _, y in b)) for b in buckets.values())
 
 
-async def accuracy(models):
+async def accuracy(models, vague=False):
     items = build()
+    if vague:
+        items = [{**it, "check": {"kind": it["check"]["kind"], "question": it["check"]["question"]}} for it in items]
     sem = asyncio.Semaphore(8)
     async with httpx.AsyncClient() as c:
         async def one(model, it):
@@ -89,6 +93,8 @@ async def fanout(model):
 if __name__ == "__main__":
     cmd, args = (sys.argv[1] if len(sys.argv) > 1 else "accuracy"), sys.argv[2:]
     if cmd == "accuracy":
-        asyncio.run(accuracy(args or [None]))
+        vague = "--vague" in args
+        args = [a for a in args if a != "--vague"]
+        asyncio.run(accuracy(args or [None], vague=vague))
     else:
         asyncio.run(fanout(args[0] if args else None))

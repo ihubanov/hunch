@@ -201,7 +201,9 @@ constraint is really enforced (it asks the model to write "hello" while restrict
 
 Hunch ships a benchmark (`bench/`) of 240 **fictional, labelled look-alike pairs**: "does NEW replace OLD?" and
 "do A and B say the same thing?". It deliberately includes restatements and same-value-different-thing traps,
-two runs per model, with yes counted at `p_yes ≥ 0.9`. Results on vLLM with NVFP4 checkpoints, measured 2026-09:
+two runs per model, with yes counted at `p_yes ≥ 0.9`. All results below use the checks in
+[`bench/dataset.py`](bench/dataset.py), which **name the look-alike cases** in `no_if` (e.g. *"`new` restates the same
+value, or is about a different thing"*). Results on vLLM with NVFP4 checkpoints, measured 2026-09:
 
 | Model | Accuracy | AUROC | Brier | ECE | Max drift between runs |
 | --- | --- | --- | --- | --- | --- |
@@ -211,14 +213,30 @@ two runs per model, with yes counted at `p_yes ≥ 0.9`. Results on vLLM with NV
 | Qwen3.6-35B-A3B (AWQ int4, on a Jetson AGX Orin) | 99.6 | 1.000 | 0.055 | 0.116 | 0.263 |
 | GLM-5.3 | 66.7: constrained but indecisive (p_yes stuck at 0.1–0.6) | | | | |
 
+### Same benchmark, vague checks
+
+The same 240 pairs with only the `question` ("Does `new` replace `old`'s value for the SAME thing?"), with no `yes_if` /
+`no_if` (`python bench/bench.py accuracy --vague <model>`):
+
+| Model | Accuracy, look-alikes named | Accuracy, question only | AUROC, question only | Brier, question only |
+| --- | --- | --- | --- | --- |
+| Qwen3.5-397B-A17B | 100.0 | **83.3** | 0.884 | 0.182 |
+| Gemma-4-31B-IT | 98.8 | **80.4** | 0.863 | 0.196 |
+| DeepSeek-V4-Flash (debias on) | 96.2 | **72.1** | 0.932 | 0.329 |
+
+The model and the service are the same; only the definitions changed. Two short definitions (`yes_if` / `no_if`) are worth 17–24
+accuracy points here, more than the difference between any two of these models. Write the definitions first, then
+choose the model.
+
 These are results for one synthetic task on our hardware. **Measure on your own labelled cases** before a decision depends on
 Hunch: `python bench/bench.py accuracy <model>` shows how.
 
 ## Writing good checks
 
-- **Name the look-alike.** Say what counts as *no* for the case that looks most like *yes*. "Does NEW
-  replace OLD?" with no definition of *no* got 39 of 40 restatements wrong on one model. One sentence in `no_if`
-  ("restating the same value, or a different thing") fixed it.
+- **Name the look-alike.** Say what counts as *no* for the case that looks most like *yes*. On the bundled
+  benchmark, dropping `yes_if` / `no_if` costs 17–24 accuracy points on every model tested
+  (see [vague checks](#same-benchmark-vague-checks)). One sentence in `no_if` ("restating the same value, or a
+  different thing") is most of the fix.
 - **Definitions go in `yes_if` / `no_if` and option descriptions,** not only in the question.
 - **One judgment per check.** Split "is this a good candidate?" into several checks and combine them in code.
 - **Keep arithmetic, counting, dates and IDs in code.** Give the model only the judgment.
