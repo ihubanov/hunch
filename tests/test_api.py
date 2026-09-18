@@ -1,0 +1,192 @@
+"""Offline tests against a fake OpenAI-compatible backend (httpx.MockTransport)."""
+import json
+import math
+import re
+from dataclasses import replace
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+
+from hunch.config import ModelSpec, Settings
+from hunch.engine import confidence
+from hunch.server import create_app
+
+STAR = "★"  # the fake backend prefers the option / level / group whose line contains this
+
+SETTINGS = Settings(
+    backend_url="http://backend.test",
+    models={"fast": ModelSpec(name="fast", backend_model="org/fast-model"),
+            "biased": ModelSpec(name="biased", backend_model="org/biased-model", debias=True)},
+    default_model="fast",
+)
+
+
+def fake_backend(prose=False, fail_first=0, status=504):
+    state = {"fails": fail_first, "calls": 0, "bodies": []}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "org/fast-model"}, {"id": "org/biased-model"}]})
+        state["calls"] += 1
+        if state["fails"] > 0:
+            state["fails"] -= 1
+            return httpx.Response(status, text="try later", headers={"retry-after": "0"})
+        body = json.loads(request.content)
+        state["bodies"].append(body)
+        labels = body["structured_outputs"]["choice"]
+        user = body["messages"][-1]["content"]
+        if labels == ["Y", "N"]:
+            pref = "Y" if "yes-please" in user else "N"
+        else:
+            pref, current = labels[0], labels[0]
+            for line in user.splitlines():
+                m = re.match(r"^(?:GROUP )?([A-Z0-9])[):]", line.strip())
+                if m and m.group(1) in labels:
+                    current = m.group(1)
+                    if STAR in line:
+                        pref = current
+                    continue
+                if STAR in line and line.startswith("  - "):
+                    pref = current
+        others = [lab for lab in labels if lab != pref]
+        top = [{"token": pref, "logprob": math.log(0.7)}]
+        top += [{"token": lab, "logprob": math.log(0.2 / len(others))} for lab in others][:17]
+        top += [{"token": "<eos>", "logprob": math.log(0.05)}, {"token": "The", "logprob": math.log(0.05)}]
+        chosen = "The" if prose else pref
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": chosen}, "logprobs": {"content": [{"token": chosen, "logprob": math.log(0.7), "top_logprobs": top}]}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 1}})
+
+    return httpx.MockTransport(handler), state
+
+
+def client(settings=SETTINGS, **kw):
+    transport, state = fake_backend(**kw)
+    return TestClient(create_app(settings, transport=transport)), state
+
+
+def judge(c, checks, **extra):
+    return c.post("/v1/judge", json={"context": "some context", "checks": checks, **extra})
+
+
+def test_yesno_renormalised_over_labels():
+    c, state = client()
+    with c:
+        r = judge(c, {"a": {"kind": "yesno", "question": "yes-please?"}, "b": {"kind": "yesno", "question": "nope"}})
+    assert r.status_code == 200, r.text
+    res = r.json()["results"]
+    assert res["a"] == {"kind": "yesno", "p_yes": pytest.approx(0.7 / 0.9, abs=1e-3)}  # junk tokens don't dilute
+    assert res["b"]["p_yes"] == pytest.approx(0.2 / 0.9, abs=1e-3)
+    assert r.json()["model"] == "fast"
+    assert r.json()["usage"] == {"prompt_tokens": 200, "completion_tokens": 2, "backend_calls": 2}
+    assert all("structured_outputs" in b and "guided_choice" not in b for b in state["bodies"])
+
+
+def test_pick_small():
+    c, _ = client()
+    with c:
+        r = judge(c, {"q": {"kind": "pick", "question": "team?", "options": {"billing": None, "technical": f"bugs {STAR}", "sales": None}}})
+    res = r.json()["results"]["q"]
+    assert res["pick"] == "technical"
+    assert sum(res["probs"].values()) == pytest.approx(1.0, abs=1e-3)
+    assert res["confidence"] == pytest.approx(confidence(list(res["probs"].values())), abs=1e-3)
+
+
+@pytest.mark.parametrize("n", [16, 40, 300])
+def test_pick_grouped(n):
+    c, state = client()
+    target = f"opt_{n - 3}"
+    options = {f"opt_{i}": (f"desc {STAR}" if f"opt_{i}" == target else None) for i in range(n)}
+    with c:
+        r = judge(c, {"q": {"kind": "pick", "question": "which?", "options": options}})
+    assert r.status_code == 200, r.text
+    res = r.json()["results"]["q"]
+    assert res["pick"] == target and len(res["probs"]) == n
+    assert sum(res["probs"].values()) == pytest.approx(1.0, abs=1e-2)
+    assert state["calls"] == 1 + math.ceil(n / 15)
+
+
+def test_scale():
+    c, _ = client()
+    with c:
+        r = judge(c, {"s": {"kind": "scale", "question": "how?", "levels": ["low", "mid", f"high {STAR}"]}})
+    res = r.json()["results"]["s"]
+    assert res["probs"][2] == pytest.approx(0.7 / 0.9, abs=1e-3)
+    assert res["value"] == pytest.approx(sum(i * p for i, p in enumerate(res["probs"])), abs=1e-3)
+
+
+def test_trivial_checks_need_no_backend_call():
+    c, state = client()
+    with c:
+        r = judge(c, {"p": {"kind": "pick", "options": {"only": None}}, "s": {"kind": "scale", "levels": ["one"]}})
+    assert r.json()["results"]["p"]["pick"] == "only" and state["calls"] == 0
+
+
+@pytest.mark.parametrize("checks,code", [
+    ({"q": {"kind": "pick", "options": {f"o{i}": None for i in range(301)}}}, "too_many_options"),
+    ({"q": {"kind": "scale", "levels": [str(i) for i in range(11)]}}, "too_many_levels"),
+    ({"q": {"kind": "yesno"}}, "invalid_request"),
+    ({"q": {"kind": "banana"}}, "invalid_request"),
+    ({}, "invalid_request"),
+])
+def test_validation(checks, code):
+    c, state = client()
+    with c:
+        r = judge(c, checks)
+    assert r.status_code == 400 and r.json()["error"]["code"] == code, r.text
+    assert state["calls"] == 0
+
+
+def test_unknown_model_and_unknown_fields():
+    c, _ = client()
+    with c:
+        r1 = judge(c, {"q": {"kind": "yesno", "question": "x"}}, model="nope")
+        r2 = judge(c, {"q": {"kind": "yesno", "question": "x"}}, temperature=0)
+    assert r1.status_code == 400 and r1.json()["error"]["code"] == "unknown_model"
+    assert r2.status_code == 400 and r2.json()["error"]["code"] == "invalid_request"
+
+
+def test_unconstrained_backend_fails_loudly():
+    c, _ = client(prose=True)
+    with c:
+        r = judge(c, {"q": {"kind": "yesno", "question": "x"}})
+    assert r.status_code == 502 and "structured_outputs" in r.json()["error"]["message"]
+
+
+@pytest.mark.parametrize("status", [429, 504])
+def test_retries_transient_errors(status):
+    c, state = client(fail_first=2, status=status)
+    with c:
+        r = judge(c, {"q": {"kind": "yesno", "question": "yes-please"}})
+    assert r.status_code == 200 and state["calls"] == 3
+
+
+def test_backend_down_is_503():
+    c, _ = client(fail_first=99)
+    with c:
+        r = judge(c, {"q": {"kind": "yesno", "question": "x"}})
+    assert r.status_code == 503 and r.json()["error"]["code"] == "backend_unavailable"
+
+
+def test_debias_asks_both_orders():
+    c, state = client()
+    with c:
+        judge(c, {"n": {"kind": "yesno", "question": "x"}, "p": {"kind": "pick", "options": {"a": None, "b": None}}}, model="biased")
+    assert state["calls"] == 4
+
+
+def test_models_health_and_auth():
+    c, _ = client(settings=replace(SETTINGS, api_keys=frozenset({"k1"})))
+    with c:
+        assert c.get("/v1/models").status_code == 401
+        r = c.get("/v1/models", headers={"Authorization": "Bearer k1"})
+        h = c.get("/health")
+    assert {m["name"] for m in r.json()["models"]} == {"fast", "biased"}
+    assert h.status_code == 200 and h.json()["ok"] is True
+
+
+def test_confidence():
+    assert confidence([1.0, 0.0, 0.0]) == pytest.approx(1.0)
+    assert confidence([1 / 3] * 3) == pytest.approx(0.0, abs=1e-9)
+    assert 0 < confidence([0.7, 0.2, 0.1]) < 1

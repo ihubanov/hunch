@@ -1,0 +1,32 @@
+# Copy to hunch.toml (or point HUNCH_CONFIG at it).
+
+[backend]
+url = "http://localhost:8000"      # any vLLM OpenAI-compatible server
+# api_key = "..."                  # if the backend requires a bearer key
+# max_top_logprobs = 20            # vLLM --max-logprobs (default 20)
+
+[service]
+default_model = "qwen"
+max_concurrency = 16               # simultaneous backend calls; keep modest on a shared server
+timeout_s = 30.0
+retries = 4                        # on 429 / 5xx / timeouts
+group_size = 15                    # options per call for big picks
+# api_keys = ["change-me"]         # required when listening beyond localhost
+
+[models.qwen]
+backend_model = "Qwen/Qwen3.5-397B-A17B"
+description = "Most accurate in the bundled benchmark"
+
+[models.gemma]
+backend_model = "google/gemma-4-31b-it"
+description = "Smaller, best calibrated"
+
+[models.deepseek]
+backend_model = "deepseek-ai/DeepSeek-V4-Flash"
+description = "Favours the first-listed answer, so ask both orders"
+debias = true
+
+# Per-model extra request fields (default: {"reasoning_effort": "none"}), e.g. for chat templates:
+# [models.qwen.extra_body]
+# reasoning_effort = "none"
+# chat_template_kwargs = { enable_thinking = false }

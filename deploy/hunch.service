@@ -1,0 +1,18 @@
+# systemd user unit:
+#   cp deploy/hunch.service ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now hunch
+# Adjust WorkingDirectory / ExecStart to where Hunch and its virtualenv live.
+[Unit]
+Description=Hunch: calibrated LLM judgments over a vLLM backend
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/hunch
+Environment=HUNCH_HOST=127.0.0.1
+Environment=HUNCH_PORT=8791
+Environment=HUNCH_LOG=warning
+ExecStart=%h/hunch/.venv/bin/python -m hunch
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

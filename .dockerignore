@@ -1,0 +1,9 @@
+.venv
+.git
+.pytest_cache
+**/__pycache__
+server.log
+hunch.toml
+tests
+bench
+deploy

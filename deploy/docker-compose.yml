@@ -1,0 +1,14 @@
+# docker compose up -d && docker compose exec hunch python -m hunch selftest
+services:
+  hunch:
+    build: ..
+    image: hunch:1.0.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8791:8791"
+    environment:
+      HUNCH_BACKEND_URL: "http://vllm:8000"          # your vLLM server
+      HUNCH_API_KEYS: "${HUNCH_API_KEYS:?set a key}"
+      HUNCH_CONCURRENCY: "16"
+    volumes:
+      - ./hunch.toml:/app/hunch.toml:ro
