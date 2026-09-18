@@ -92,6 +92,93 @@ Errors come back as `{"error": {"code": "...", "message": "..."}}`:
 
 `GET /v1/models` lists the configured models. `GET /health` checks that the backend serves them.
 
+## Why logprobs instead of asking for JSON
+
+The common way to get a decision out of an LLM is to ask for JSON (`{"is_refund": true}`) and parse it. That works,
+but you only get the model's *top* answer, with no sense of how close the call was. You pay for the output tokens,
+reasoning models may think for hundreds of tokens first, and every so often the output isn't valid.
+
+Hunch asks for exactly **one constrained token** and reads the probability the model put on each allowed answer:
+
+| | Ask for JSON | Hunch |
+| --- | --- | --- |
+| What you get | one answer (`true`) | a probability (`p_yes: 0.93`) plus a distribution for picks and scales |
+| Close calls | invisible: 51% and 99% look the same | visible, so you can route 0.4–0.6 to a human or a bigger model |
+| Output tokens | tens to hundreds (more with thinking) | 1 |
+| Malformed output | possible, needs retries or repair | impossible: the grammar only allows the labels |
+| Thresholds | fixed by the model's wording | yours: act at 0.9, review at 0.5–0.9, drop below 0.5 |
+| Many questions | one long prompt, and answers influence each other | independent parallel checks over the same cached context |
+
+The probability is what makes this useful in code: you pick the threshold per decision, based on how costly a
+mistake is. That's a plain `if p_yes >= 0.9`, not a prompt tweak.
+
+## Using it from Python
+
+No client library is needed; it's one POST:
+
+```python
+import httpx
+
+HUNCH = "http://127.0.0.1:8791"
+
+def judge(context, checks, model=None):
+    r = httpx.post(f"{HUNCH}/v1/judge", json={"context": context, "checks": checks, "model": model}, timeout=60)
+    r.raise_for_status()
+    return r.json()["results"]
+
+res = judge(
+    {"old": "The staging DB listens on port 5432.", "new": "Staging DB moved to port 6432."},
+    {"replaces": {"kind": "yesno",
+                  "question": "Does `new` replace `old`'s value for the same thing?",
+                  "yes_if": "same thing, changed value",
+                  "no_if": "the same value restated, or a different thing"}},
+)
+p = res["replaces"]["p_yes"]
+if p >= 0.9:
+    ...        # act automatically
+elif p >= 0.5:
+    ...        # queue for review
+else:
+    ...        # leave as is
+```
+
+Patterns that work well:
+
+- **Fan out.** Put every question you *might* need about one context in a single request. They run in parallel and
+  share the cached context, so the questions your code ends up ignoring cost little.
+- **Choose from candidates, don't generate.** Find candidates with code (regex, search, a list of IDs) and ask a
+  `pick` which one fits. The answer is always one of your candidates.
+- **Decompose.** Rather than one "how good is this?" `scale`, ask three narrow `scale`s and weight them in code.
+  When your priorities change, you change a weight, not a prompt.
+- **Gate expensive work.** Use a cheap `yesno` ("does this passage answer the question at all?") before sending
+  anything to a big generative model.
+
+## Choosing a model
+
+From the bundled benchmark (see [Measured](#measured)):
+
+- **Most accurate:** a large instruct model (Qwen3.5-397B: 100%). Use it for decisions where errors are costly.
+- **Best calibrated per GPU:** a mid-size dense model (Gemma-4-31B: 98.8%, calibration error 0.013). Its
+  probabilities are the most trustworthy as probabilities, and it's light enough to run next to other workloads.
+- **Edge / lowest latency per check:** a small MoE (Qwen3.6-35B-A3B, 4-bit, on a Jetson AGX Orin: 99.6%, ~230 ms per
+  check). Best when each request asks only a few checks.
+- **Position-biased models** (DeepSeek-V4-Flash here) work with `debias = true`, at twice the calls.
+- **Avoid models that stay indecisive when constrained.** GLM-5.3 kept `p_yes` between 0.1 and 0.6 and never cleared a
+  0.9 gate. Run `python -m hunch selftest` and `python bench/bench.py accuracy <model>` before adopting a model.
+- **Thinking models must have thinking switched off per request.** Otherwise the one allowed token is spent on
+  reasoning. Hunch sends `reasoning_effort: "none"` by default. Some chat templates need
+  `chat_template_kwargs = { enable_thinking = false }` in the model's `extra_body` instead (see `hunch.toml.example`).
+
+## When not to use Hunch
+
+- **Generating text** (summaries, replies, extraction of free-form values). Use a generative model, or have code
+  find candidates and let Hunch `pick`.
+- **Arithmetic, counting, date comparison, exact matching.** Do it in code.
+- **Multi-step reasoning.** A check is a snap judgment over the context you give it. Split the problem, or use a
+  reasoning model.
+- **Security boundaries.** Context is data, but a model can still be steered by adversarial text inside it. Don't make
+  a Hunch check the only thing standing between untrusted input and a dangerous action.
+
 ## How it works
 
 1. **Labels, not text.** Answers map to single-token labels: `Y`/`N`, letters `A`… for options, and digits `0`–`9`
