@@ -204,13 +204,13 @@ Hunch ships a benchmark (`bench/`) of 240 **fictional, labelled look-alike pairs
 "do A and B say the same thing?". It deliberately includes restatements and same-value-different-thing traps,
 two runs per model, with yes counted at `p_yes ≥ 0.9`. Results on vLLM with NVFP4 checkpoints, measured 2026-09:
 
-| Model | Accuracy | AUROC | Brier | ECE | Max drift between runs | p50 / p95 |
-| --- | --- | --- | --- | --- | --- | --- |
-| Qwen3.5-397B-A17B | **100.0** | 1.000 | 0.017 | 0.049 | 0.150 | 646 / 719 ms |
-| Gemma-4-31B-IT | 98.8 | 0.991 | **0.013** | **0.013** | **0.011** | 546 / 615 ms |
-| DeepSeek-V4-Flash (debias on) | 96.2 | 0.996 | 0.118 | 0.179 | 0.369 | 734 / 7300 ms |
-| Qwen3.6-35B-A3B (AWQ int4, on a Jetson AGX Orin) | 99.6 | 1.000 | 0.055 | 0.116 | 0.263 | 790 / 821 ms |
-| GLM-5.3 | 66.7: constrained but indecisive (p_yes stuck at 0.1–0.6) | | | | | |
+| Model | Accuracy | AUROC | Brier | ECE | Max drift between runs |
+| --- | --- | --- | --- | --- | --- |
+| Qwen3.5-397B-A17B | **100.0** | 1.000 | 0.017 | 0.049 | 0.150 |
+| Gemma-4-31B-IT | 98.8 | 0.991 | **0.013** | **0.013** | **0.011** |
+| DeepSeek-V4-Flash (debias on) | 96.2 | 0.996 | 0.118 | 0.179 | 0.369 |
+| Qwen3.6-35B-A3B (AWQ int4, on a Jetson AGX Orin) | 99.6 | 1.000 | 0.055 | 0.116 | 0.263 |
+| GLM-5.3 | 66.7: constrained but indecisive (p_yes stuck at 0.1–0.6) | | | | |
 
 Fan-out on Qwen3.5 at the default concurrency of 16: 1 check 570 ms, 10 checks 740 ms, 50 checks 2.4 s,
 100 checks 4.0 s, a 100-option pick 730 ms.
