@@ -77,7 +77,10 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
     async def health(request: Request):
         engine: Engine = request.app.state.engine
         try:
-            r = await engine.client.get(f"{settings.backend_url}/v1/models", timeout=5)
+            headers = {"Authorization": f"Bearer {settings.backend_api_key}"} if settings.backend_api_key else {}
+            r = await engine.client.get(f"{settings.backend_url}/v1/models", headers=headers, timeout=5)
+            if r.status_code != 200:
+                return JSONResponse({"ok": False, "error": f"backend /v1/models returned HTTP {r.status_code}"}, status_code=503)
             served = {m["id"] for m in r.json().get("data", [])}
         except Exception as e:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": repr(e)}, status_code=503)

@@ -190,3 +190,22 @@ def test_confidence():
     assert confidence([1.0, 0.0, 0.0]) == pytest.approx(1.0)
     assert confidence([1 / 3] * 3) == pytest.approx(0.0, abs=1e-9)
     assert 0 < confidence([0.7, 0.2, 0.1]) < 1
+
+
+def test_health_sends_backend_key_and_reports_auth_failure():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["auth"] = request.headers.get("authorization")
+        if seen["auth"] != "Bearer backend-secret":
+            return httpx.Response(401, json={"error": "Unauthorized"})
+        return httpx.Response(200, json={"data": [{"id": "org/fast-model"}, {"id": "org/biased-model"}]})
+
+    ok = TestClient(create_app(replace(SETTINGS, backend_api_key="backend-secret"), transport=httpx.MockTransport(handler)))
+    with ok:
+        assert ok.get("/health").json()["ok"] is True
+    assert seen["auth"] == "Bearer backend-secret"
+    bad = TestClient(create_app(replace(SETTINGS, backend_api_key="wrong"), transport=httpx.MockTransport(handler)))
+    with bad:
+        r = bad.get("/health")
+    assert r.status_code == 503 and "401" in r.json()["error"]

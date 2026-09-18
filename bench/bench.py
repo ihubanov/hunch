@@ -56,6 +56,9 @@ async def accuracy(models):
             runs = [await asyncio.gather(*[one(m, it) for it in items]) for _ in range(2)]
             first = runs[0]
             scored = [(p, it["label"]) for (p, _), it in zip(first, items) if p is not None]
+            if not scored:
+                print(f"{(m or '(default)'):16} every request failed; check the model name, the backend and auth")
+                continue
             acc = 100 * sum((p is not None and p >= 0.9) == bool(it["label"]) for (p, _), it in zip(first, items)) / len(items)
             drift = [abs(a[0] - b[0]) for a, b in zip(*runs) if a[0] is not None and b[0] is not None]
             flips = sum((a[0] >= 0.5) != (b[0] >= 0.5) for a, b in zip(*runs) if a[0] is not None and b[0] is not None)

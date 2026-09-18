@@ -64,7 +64,11 @@ async def run(names: list[str]) -> int:
         print(f"backend: {s.backend_url}")
         headers = {"Authorization": f"Bearer {s.backend_api_key}"} if s.backend_api_key else {}
         try:
-            served = {m["id"] for m in (await client.get(f"{s.backend_url}/v1/models", headers=headers, timeout=10)).json().get("data", [])}
+            r = await client.get(f"{s.backend_url}/v1/models", headers=headers, timeout=10)
+            if r.status_code != 200:
+                print(f"FAIL backend /v1/models returned HTTP {r.status_code} (check HUNCH_BACKEND_KEY / [backend] api_key)")
+                return 1
+            served = {m["id"] for m in r.json().get("data", [])}
         except Exception as e:  # noqa: BLE001
             print(f"FAIL backend /v1/models unreachable: {e!r}")
             return 1
