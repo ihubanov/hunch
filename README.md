@@ -191,7 +191,7 @@ From the bundled benchmark (see [Measured](#measured)):
   only with a strict act threshold (≥ 0.97) and human review below that.
 - **Best calibrated per GPU:** a mid-size dense model (Gemma-4-31B: 98.8%, calibration error 0.013). Its
   probabilities are the most trustworthy as probabilities, and it's light enough to run next to other workloads.
-- **Edge:** a small MoE (Qwen3.6-35B-A3B, 4-bit, on a Jetson AGX Orin: 99.6%). It fits on edge hardware and
+- **Edge:** a small MoE (Qwen3.6-35B-A3B, 4-bit: 99.6%). It fits on edge hardware and
   suits requests that ask only a few checks.
 - **Position-biased models** (DeepSeek-V4-Flash here) work with `debias = true`, at twice the calls.
 - **Avoid models that stay indecisive when constrained.** GLM-5.3 kept `p_yes` between 0.1 and 0.6 and never cleared a
@@ -237,40 +237,45 @@ two runs per model, with yes counted at `p_yes ≥ 0.9`. All results below use t
 [`hunch/lookalikes.py`](hunch/lookalikes.py), which **name the look-alike cases** in `no_if` (e.g. *"`new` restates the same
 value, or is about a different thing"*). Results on vLLM (NVFP4 checkpoints unless noted), measured 2026-09:
 
-| Model | Accuracy | AUROC | Brier | ECE | Max drift between runs |
-| --- | --- | --- | --- | --- | --- |
-| Qwen3.5-397B-A17B | **100.0** | 1.000 | 0.017 | 0.049 | 0.150 |
-| Qwen3.8-27B (bf16) | 99.6 | 1.000 | 0.030 | 0.058 | – (0 flips) |
-| Gemma-4-31B-IT | 98.8 | 0.991 | **0.013** | **0.013** | **0.011** |
-| DeepSeek-V4-Flash (debias on) | 96.2 | 0.996 | 0.118 | 0.179 | 0.369 |
-| Qwen3.6-35B-A3B (AWQ int4, on a Jetson AGX Orin) | 99.6 | 1.000 | 0.055 | 0.116 | 0.263 |
-| Qwen3.5-9B (bf16, Jetson AGX Orin) | 90.8 | 0.996 | 0.192 | 0.266 | – (0 flips) |
-| Qwen3-8B (bf16, Jetson AGX Orin) | 76.7 | 0.838 | 0.238 | 0.242 | 0.169 |
-| Qwen3-14B (bf16, Jetson AGX Orin) | 71.7 | 0.806 | 0.286 | 0.289 | 0.195 |
-| Qwen3-0.6B (bf16, Jetson AGX Orin) | 35.8 | 0.758 | 0.611 | 0.630 | 0.024 |
-| GLM-5.3 | 66.7: constrained but indecisive (p_yes stuck at 0.1–0.6) | | | | |
+| Model | Verdict | Accuracy | AUROC | Brier | ECE | Max drift between runs |
+| --- | --- | --- | --- | --- | --- | --- |
+| Qwen3.5-397B-A17B | ✅ Qualified | **100.0** | 1.000 | 0.017 | 0.049 | 0.150 |
+| Qwen3.8-27B (bf16) | ✅ Qualified | 99.6 | 1.000 | 0.030 | 0.058 | – (0 flips) |
+| Qwen3.6-35B-A3B (AWQ int4) | ✅ Qualified* | 99.6 | 1.000 | 0.055 | 0.116 | 0.263 |
+| Gemma-4-31B-IT | ✅ Qualified | 98.8 | 0.991 | **0.013** | **0.013** | **0.011** |
+| DeepSeek-V4-Flash (debias on) | ❌ Not qualified | 96.2 | 0.996 | 0.118 | 0.179 | 0.369 |
+| Qwen3.5-9B (bf16) | ❌ Not qualified | 90.8 | 0.996 | 0.192 | 0.266 | – (0 flips) |
+| Qwen3-8B (bf16) | ❌ Not qualified | 76.7 | 0.838 | 0.238 | 0.242 | 0.169 |
+| Qwen3-14B (bf16) | ❌ Not qualified | 71.7 | 0.806 | 0.286 | 0.289 | 0.195 |
+| GLM-5.3 | ❌ Not qualified | 66.7 | – | – | – | – |
+| Qwen3-0.6B (bf16) | ❌ Not qualified | 35.8 | 0.758 | 0.611 | 0.630 | 0.024 |
 
-Verdicts with `qualify`'s default criteria. Qwen3.5-397B, Qwen3.8-27B, Gemma-4-31B and Qwen3.5-9B were run through
-`python -m hunch qualify`; the rest are the same criteria applied to their benchmark numbers. **Qualified**:
-Qwen3.5-397B, Qwen3.8-27B, Gemma-4-31B, and Qwen3.6-35B-A3B on accuracy, calibration and stability (its question-only
-run wasn't measured). **Not qualified**: Qwen3.5-9B (calibration: real positives sit at p≈0.99, but the
-look-alike traps land at a median of 0.42–0.65, so it hedges rather than being confidently wrong); the whole Qwen3
-generation (confidently wrong, and definitions make it *worse*); DeepSeek-V4-Flash (calibration); GLM-5.3.
+Verdicts use `python -m hunch qualify`'s default criteria (accuracy ≥ 90%, ECE ≤ 0.15, definitions must not hurt,
+≤ 2% flips). Qwen3.5-397B, Qwen3.8-27B, Gemma-4-31B and Qwen3.5-9B were run through `qualify` itself; for the others the
+same criteria are applied to their benchmark numbers. \* Qwen3.6-35B-A3B passes on accuracy, calibration and stability;
+its question-only run wasn't measured.
+
+Why the others fail:
+- **DeepSeek-V4-Flash:** calibration.
+- **Qwen3.5-9B:** calibration. Real positives sit at p≈0.99, but the look-alike traps land at a median of 0.42–0.65, so
+  it hedges rather than being confidently wrong.
+- **The Qwen3 generation:** confidently wrong, and definitions make it *worse*.
+- **GLM-5.3:** constrained but indecisive (p_yes stuck at 0.1–0.6).
 
 ### Same benchmark, vague checks
 
 The same 240 pairs with only the `question` ("Does `new` replace `old`'s value for the SAME thing?"), with no `yes_if` /
 `no_if` (`python bench/bench.py accuracy --vague <model>`):
 
-| Model | Accuracy, look-alikes named | Accuracy, question only | AUROC, question only | Brier, question only |
-| --- | --- | --- | --- | --- |
-| Qwen3.5-397B-A17B | 100.0 | **83.3** | 0.884 | 0.182 |
-| Gemma-4-31B-IT | 98.8 | **80.4** | 0.863 | 0.196 |
-| DeepSeek-V4-Flash (debias on) | 96.2 | **72.1** | 0.932 | 0.329 |
-| Qwen3.8-27B | 99.6 | **80.0** | – | – |
-| Qwen3.5-9B | 90.8 | **81.7** | – | – |
-| Qwen3-8B | 76.7 | **81.2** (definitions hurt) | – | – |
-| Qwen3-14B | 71.7 | **74.6** (definitions hurt) | – | – |
+| Model | Verdict | Accuracy, look-alikes named | Accuracy, question only | AUROC, question only | Brier, question only |
+| --- | --- | --- | --- | --- | --- |
+| Qwen3.5-397B-A17B | ✅ Qualified | 100.0 | **83.3** | 0.884 | 0.182 |
+| Qwen3.8-27B | ✅ Qualified | 99.6 | **80.0** | – | – |
+| Gemma-4-31B-IT | ✅ Qualified | 98.8 | **80.4** | 0.863 | 0.196 |
+| DeepSeek-V4-Flash (debias on) | ❌ Not qualified | 96.2 | **72.1** | 0.932 | 0.329 |
+| Qwen3.5-9B | ❌ Not qualified | 90.8 | **81.7** | – | – |
+| Qwen3-8B | ❌ Not qualified | 76.7 | **81.2** (definitions hurt) | – | – |
+| Qwen3-14B | ❌ Not qualified | 71.7 | **74.6** (definitions hurt) | – | – |
 
 The model and the service are the same; only the definitions changed. On every current-generation model, two short
 definitions (`yes_if` / `no_if`) are worth 9–24 accuracy points. The older Qwen3 models go the other way, and that is
