@@ -1,5 +1,6 @@
 """python -m hunch            serve (HUNCH_HOST / HUNCH_PORT, default 127.0.0.1:8791)
-python -m hunch selftest   pre-flight check against the configured backend (exit 0 = pass)
+python -m hunch selftest   quick pre-flight check against the configured backend (exit 0 = pass)
+python -m hunch qualify    full qualification of a model as a Hunch backend (exit 0 = qualified)
 """
 import ipaddress
 import os
@@ -38,5 +39,8 @@ def serve() -> int:
 if __name__ == "__main__":
     if sys.argv[1:2] == ["selftest"]:
         from .selftest import main
+        sys.exit(main(sys.argv[2:]))
+    if sys.argv[1:2] == ["qualify"]:
+        from .qualify import main
         sys.exit(main(sys.argv[2:]))
     sys.exit(serve())

@@ -59,6 +59,34 @@ curl -s localhost:8791/v1/judge -H 'content-type: application/json' -d '{
 That's a real response from Qwen3.5-397B (lightly trimmed). `p_yes` is 0.59 because the customer reports a double charge but never
 explicitly asks for money back. Hunch reports that uncertainty instead of guessing, and your code decides what 0.59 means.
 
+## Qualify your model first
+
+Not every model makes a good Hunch backend. In our tests the older Qwen3 generation was **confidently wrong**, and
+spelling out definitions made it *worse*. Check before you rely on a model:
+
+```bash
+python -m hunch qualify qwen            # one or more model names from hunch.toml (default: all)
+```
+
+It runs straight against your backend (no Hunch server needed) and uses the 240 fictional look-alike pairs that ship
+with Hunch ([`hunch/lookalikes.py`](hunch/lookalikes.py)): two runs with the look-alikes named, plus one with the
+bare question. That's about 720 one-token calls, roughly a minute at the default concurrency. A model is
+**QUALIFIED** when:
+
+| Criterion | Default | Why |
+| --- | --- | --- |
+| Backend setup | constraint enforced, logprobs returned | otherwise answers are unconstrained |
+| Accuracy at `p_yes ≥ 0.9` | ≥ 90% (`--min-accuracy`) | the gate you'd actually use |
+| Calibration error (ECE) | ≤ 0.15 (`--max-ece`) | a wrong answer mustn't look as certain as a right one |
+| Definitions help | named ≥ question-only | if better-written checks make it worse, you can't fix it by writing better checks |
+| Stability | ≤ 2% of answers flip between identical runs (`--max-flip-rate`) | the same input should get the same decision |
+
+A backend that is down is reported as **UNAVAILABLE**, not as a failed model. The exit code is 0 only if every
+model qualifies, and `--json FILE` writes the full report. `--quick` does one named run (no stability check).
+
+`python -m hunch selftest` is the 10-second version (setup plus 12 cases). Run it after every deployment. Use
+`qualify` when choosing or upgrading a model.
+
 ## API
 
 ### `POST /v1/judge`
@@ -199,10 +227,10 @@ constraint is really enforced (it asks the model to write "hello" while restrict
 
 ## Measured
 
-Hunch ships a benchmark (`bench/`) of 240 **fictional, labelled look-alike pairs**: "does NEW replace OLD?" and
+Hunch ships 240 **fictional, labelled look-alike pairs** ([`hunch/lookalikes.py`](hunch/lookalikes.py)): "does NEW replace OLD?" and
 "do A and B say the same thing?". It deliberately includes restatements and same-value-different-thing traps,
 two runs per model, with yes counted at `p_yes ≥ 0.9`. All results below use the checks in
-[`bench/dataset.py`](bench/dataset.py), which **name the look-alike cases** in `no_if` (e.g. *"`new` restates the same
+[`hunch/lookalikes.py`](hunch/lookalikes.py), which **name the look-alike cases** in `no_if` (e.g. *"`new` restates the same
 value, or is about a different thing"*). Results on vLLM with NVFP4 checkpoints, measured 2026-09:
 
 | Model | Accuracy | AUROC | Brier | ECE | Max drift between runs |
@@ -287,7 +315,8 @@ debias = true
 ```bash
 pip install -e '.[dev]'
 pytest -q                                   # offline tests against a fake backend
-python -m hunch selftest                    # live pre-flight against your backend
+python -m hunch selftest                    # quick live pre-flight against your backend
+python -m hunch qualify qwen                 # full qualification of a model (verdict + reasons)
 python bench/bench.py accuracy qwen gemma   # live accuracy benchmark
 python bench/bench.py fanout qwen           # latency vs number of checks
 ```

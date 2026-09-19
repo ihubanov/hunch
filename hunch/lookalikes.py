@@ -1,4 +1,7 @@
-"""Fictional labelled pairs for measuring a Hunch backend (all names made up).
+"""240 fictional, labelled look-alike pairs used by `python -m hunch qualify` and bench/bench.py.
+
+Everything here is made up: names, companies, hosts (reserved .example domains), IPs (RFC 5737
+documentation range 192.0.2.0/24).
 
 Each skeleton is (old, change, restate, other):
   change  - same thing, value CHANGED          -> replaces=yes, agrees=no
@@ -21,10 +24,10 @@ SKELETONS = [
      "Orion API keys are now limited to 250 requests per minute.",
      "Each Orion API key may make up to 100 calls a minute.",
      "Vega API rate limit is 100 requests per minute per key."),
-    ("Marta Kovac is the on-call lead for the payments team.",
-     "The payments team's on-call lead is now Deniz Arslan.",
-     "Payments on-call is led by Marta Kovac.",
-     "Marta Kovac is the on-call lead for the search team."),
+    ("Robin Vale is the on-call lead for the payments team.",
+     "The payments team's on-call lead is now Casey Moor.",
+     "Payments on-call is led by Robin Vale.",
+     "Robin Vale is the on-call lead for the search team."),
     ("The build server uses Node 20.",
      "The build server was upgraded to Node 22.",
      "Node version 20 is what runs on the build server.",
@@ -61,10 +64,10 @@ SKELETONS = [
      "Brightline invoices are now due within 14 days.",
      "Payment terms for Brightline invoices are net 30.",
      "Invoices from Corvid Ltd are due within 30 days."),
-    ("The VPN concentrator for the Sofia office is 10.20.0.1.",
-     "The Sofia office VPN concentrator is now 10.20.0.254.",
-     "10.20.0.1 is the Sofia office's VPN concentrator address.",
-     "The DNS resolver for the Sofia office is 10.20.0.1."),
+    ("The VPN concentrator for the Lisbon office is 192.0.2.1.",
+     "The Lisbon office VPN concentrator is now 192.0.2.254.",
+     "192.0.2.1 is the Lisbon office's VPN concentrator address.",
+     "The DNS resolver for the Lisbon office is 192.0.2.1."),
     ("The config file for Nimbus lives at /etc/nimbus/config.yaml.",
      "Nimbus now reads its config from /opt/nimbus/conf/nimbus.toml.",
      "Nimbus is configured through /etc/nimbus/config.yaml.",
@@ -89,10 +92,10 @@ SKELETONS = [
      "Product page cache TTL in Redis was lowered to 60 seconds.",
      "Product pages stay cached in Redis for five minutes.",
      "The Redis cache TTL for search results is 300 seconds."),
-    ("Ana Petrova owns the billing microservice.",
-     "Ownership of the billing microservice moved to Luis Ortega.",
-     "The billing microservice is owned by Ana Petrova.",
-     "Ana Petrova owns the notifications microservice."),
+    ("Taylor Quinn owns the billing microservice.",
+     "Ownership of the billing microservice moved to Jordan Hale.",
+     "The billing microservice is owned by Taylor Quinn.",
+     "Taylor Quinn owns the notifications microservice."),
     ("The Borealis cluster runs Kubernetes 1.29.",
      "Borealis was upgraded to Kubernetes 1.31.",
      "Kubernetes version 1.29 is what the Borealis cluster runs.",
@@ -113,18 +116,18 @@ SKELETONS = [
      "Tern ETL now writes into the analytics_staging schema.",
      "Output of the Tern ETL job lands in analytics_raw.",
      "The Heron ETL job writes to the analytics_raw schema."),
-    ("The primary contact at Northwind for the audit is Jonas Berg.",
-     "Northwind's audit contact is now Priya Nair.",
-     "Jonas Berg is Northwind's main point of contact for the audit.",
-     "The primary contact at Northwind for the renewal is Jonas Berg."),
+    ("The primary contact at Harbor & Pine for the audit is Morgan Frost.",
+     "Harbor & Pine's audit contact is now Riley Stone.",
+     "Morgan Frost is Harbor & Pine's main point of contact for the audit.",
+     "The primary contact at Harbor & Pine for the renewal is Morgan Frost."),
     ("The default LLM temperature in the summarizer is 0.2.",
      "The summarizer's default temperature was changed to 0.7.",
      "Summarizer runs with a default temperature of 0.2.",
      "The default LLM temperature in the classifier is 0.2."),
-    ("The office Wi-Fi SSID in Plovdiv is Acme-Guest.",
-     "Plovdiv office guest Wi-Fi was renamed to Acme-Visitors.",
-     "Acme-Guest is the Wi-Fi network name at the Plovdiv office.",
-     "The office Wi-Fi SSID in Varna is Acme-Guest."),
+    ("The office Wi-Fi SSID in Porto is Acme-Guest.",
+     "Porto office guest Wi-Fi was renamed to Acme-Visitors.",
+     "Acme-Guest is the Wi-Fi network name at the Porto office.",
+     "The office Wi-Fi SSID in Braga is Acme-Guest."),
     ("Sprint length for the platform team is two weeks.",
      "The platform team switched to three-week sprints.",
      "Platform team sprints last 14 days.",
@@ -180,7 +183,8 @@ AGREES = {"kind": "yesno", "question": "Do `a` and `b` assert the SAME value for
           "no_if": "a different or changed value, or a different thing"}
 
 
-def build():
+def build(vague: bool = False):
+    """All 240 items. vague=True keeps only each check's `question` (no yes_if / no_if)."""
     items = []
     for i, (old, change, restate, other) in enumerate(SKELETONS):
         for kind, second, replaces, agrees in [("change", change, 1, 0), ("restate", restate, 0, 1), ("other", other, 0, 0)]:
@@ -188,4 +192,6 @@ def build():
                           "context": {"old": old, "new": second}, "check": REPLACES})
             items.append({"id": f"a{i:02d}-{kind}", "task": "agrees", "kind": kind, "label": agrees,
                           "context": {"a": old, "b": second}, "check": AGREES})
+    if vague:
+        items = [{**it, "check": {"kind": it["check"]["kind"], "question": it["check"]["question"]}} for it in items]
     return items

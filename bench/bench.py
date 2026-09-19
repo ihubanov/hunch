@@ -18,8 +18,8 @@ import time
 
 import httpx
 
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
-from dataset import build  # noqa: E402
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from hunch.lookalikes import build  # noqa: E402
 
 URL = os.environ.get("HUNCH_URL", "http://127.0.0.1:8791")
 HEADERS = {"Authorization": f"Bearer {os.environ['HUNCH_API_KEY']}"} if os.environ.get("HUNCH_API_KEY") else {}
@@ -45,9 +45,7 @@ def ece(pairs, bins=10):
 
 
 async def accuracy(models, vague=False):
-    items = build()
-    if vague:
-        items = [{**it, "check": {"kind": it["check"]["kind"], "question": it["check"]["question"]}} for it in items]
+    items = build(vague=vague)
     sem = asyncio.Semaphore(8)
     async with httpx.AsyncClient() as c:
         async def one(model, it):

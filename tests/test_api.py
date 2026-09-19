@@ -209,3 +209,91 @@ def test_health_sends_backend_key_and_reports_auth_failure():
     with bad:
         r = bad.get("/health")
     assert r.status_code == 503 and "401" in r.json()["error"]
+
+
+# ---------------------------------------------------------------- qualify
+from hunch.lookalikes import build  # noqa: E402
+from hunch.qualify import Criteria, Report, qualify_model, verdict  # noqa: E402
+
+
+def test_lookalikes_dataset_is_balanced_and_fictional():
+    items = build()
+    assert len(items) == 240 and sum(it["label"] for it in items) == 80
+    text = json.dumps(items)
+    assert "192.0.2." in text and "10.20." not in text  # documentation IP range only
+    vague = build(vague=True)
+    assert all(set(it["check"]) == {"kind", "question"} for it in vague)
+
+
+@pytest.mark.parametrize("fields,qualified,needle", [
+    (dict(accuracy=99.0, accuracy_vague=83.0, ece=0.05, flip_rate=0.0), True, None),
+    (dict(accuracy=85.0, accuracy_vague=80.0, ece=0.05, flip_rate=0.0), False, "accuracy"),
+    (dict(accuracy=96.0, accuracy_vague=72.0, ece=0.18, flip_rate=0.0), False, "ECE"),
+    (dict(accuracy=91.0, accuracy_vague=95.0, ece=0.05, flip_rate=0.0), False, "WORSE"),
+    (dict(accuracy=96.0, accuracy_vague=80.0, ece=0.05, flip_rate=0.05), False, "flip"),
+])
+def test_verdict(fields, qualified, needle):
+    r = verdict(Report(model="m", backend_model="b", **fields), Criteria())
+    assert r.qualified is qualified
+    if needle:
+        assert any(needle in reason for reason in r.reasons)
+
+
+def test_qualify_end_to_end_on_fake_backend():
+    import asyncio
+
+    async def go():
+        transport, _ = fake_backend()
+        async with httpx.AsyncClient(transport=transport) as client:
+            from hunch.engine import Engine
+            engine = Engine(SETTINGS, client)
+            return await qualify_model(engine, client, "fast", {"org/fast-model", "org/biased-model"}, {}, Criteria(),
+                                       quick=True, progress=lambda *_: None)
+
+    r = asyncio.run(go())
+    # the fake backend answers "no" to everything -> 160/240 = 66.7%, well below the bar
+    assert r.accuracy == pytest.approx(66.7, abs=0.1) and r.qualified is False
+    assert any("accuracy" in reason for reason in r.reasons)
+
+
+def test_qualify_rejects_unconstrained_backend():
+    import asyncio
+
+    async def go():
+        transport, _ = fake_backend(prose=True)
+        async with httpx.AsyncClient(transport=transport) as client:
+            from hunch.engine import Engine
+            return await qualify_model(Engine(SETTINGS, client), client, "fast", {"org/fast-model"}, {}, Criteria(),
+                                       quick=True, progress=lambda *_: None)
+
+    r = asyncio.run(go())
+    assert r.qualified is False and r.accuracy is None
+    assert any("structured_outputs NOT enforced" in reason for reason in r.reasons)
+
+
+def test_probe_retries_transient_errors():
+    import asyncio
+    from hunch.selftest import probe_constraint
+
+    async def go():
+        transport, state = fake_backend(fail_first=2, status=504)
+        async with httpx.AsyncClient(transport=transport) as client:
+            return await probe_constraint(client, SETTINGS, SETTINGS.models["fast"], {}), state
+
+    problem, state = asyncio.run(go())
+    assert problem is None and state["calls"] == 3
+
+
+def test_qualify_backend_down_is_unavailable_not_a_verdict():
+    import asyncio
+
+    async def go():
+        transport, _ = fake_backend(fail_first=99, status=504)
+        async with httpx.AsyncClient(transport=transport) as client:
+            from hunch.engine import Engine
+            s = replace(SETTINGS, retries=1)
+            return await qualify_model(Engine(s, client), client, "fast", {"org/fast-model"}, {}, Criteria(),
+                                       quick=True, progress=lambda *_: None)
+
+    r = asyncio.run(go())
+    assert r.unavailable is True and r.qualified is False and r.accuracy is None
