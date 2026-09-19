@@ -297,3 +297,12 @@ def test_qualify_backend_down_is_unavailable_not_a_verdict():
 
     r = asyncio.run(go())
     assert r.unavailable is True and r.qualified is False and r.accuracy is None
+
+
+def test_package_version_matches_pyproject():
+    import pathlib
+    import tomllib
+    import hunch
+    pyproject = tomllib.loads((pathlib.Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+    assert pyproject["project"]["version"] == hunch.__version__
+    assert pyproject["tool"]["setuptools"]["packages"] == ["hunch"]  # bench/ and deploy/ must not be packaged
