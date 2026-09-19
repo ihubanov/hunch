@@ -185,6 +185,10 @@ Patterns that work well:
 From the bundled benchmark (see [Measured](#measured)):
 
 - **Most accurate:** a large instruct model (Qwen3.5-397B: 100%). Use it for decisions where errors are costly.
+- **Best mid-size:** Qwen3.8-27B (99.6%, calibration error 0.058). It qualifies comfortably on a single GPU.
+- **Generation beats size.** Every Qwen3-generation model failed (Qwen3-14B scored *below* Qwen3-8B), while the newer
+  Qwen3.5+ models pass. The small Qwen3.5-9B ranks almost perfectly (AUROC 0.996) but hedges on look-alikes, so use it
+  only with a strict act threshold (≥ 0.97) and human review below that.
 - **Best calibrated per GPU:** a mid-size dense model (Gemma-4-31B: 98.8%, calibration error 0.013). Its
   probabilities are the most trustworthy as probabilities, and it's light enough to run next to other workloads.
 - **Edge:** a small MoE (Qwen3.6-35B-A3B, 4-bit, on a Jetson AGX Orin: 99.6%). It fits on edge hardware and
@@ -231,15 +235,27 @@ Hunch ships 240 **fictional, labelled look-alike pairs** ([`hunch/lookalikes.py`
 "do A and B say the same thing?". It deliberately includes restatements and same-value-different-thing traps,
 two runs per model, with yes counted at `p_yes ≥ 0.9`. All results below use the checks in
 [`hunch/lookalikes.py`](hunch/lookalikes.py), which **name the look-alike cases** in `no_if` (e.g. *"`new` restates the same
-value, or is about a different thing"*). Results on vLLM with NVFP4 checkpoints, measured 2026-09:
+value, or is about a different thing"*). Results on vLLM (NVFP4 checkpoints unless noted), measured 2026-09:
 
 | Model | Accuracy | AUROC | Brier | ECE | Max drift between runs |
 | --- | --- | --- | --- | --- | --- |
 | Qwen3.5-397B-A17B | **100.0** | 1.000 | 0.017 | 0.049 | 0.150 |
+| Qwen3.8-27B (bf16) | 99.6 | 1.000 | 0.030 | 0.058 | – (0 flips) |
 | Gemma-4-31B-IT | 98.8 | 0.991 | **0.013** | **0.013** | **0.011** |
 | DeepSeek-V4-Flash (debias on) | 96.2 | 0.996 | 0.118 | 0.179 | 0.369 |
 | Qwen3.6-35B-A3B (AWQ int4, on a Jetson AGX Orin) | 99.6 | 1.000 | 0.055 | 0.116 | 0.263 |
+| Qwen3.5-9B (bf16, Jetson AGX Orin) | 90.8 | 0.996 | 0.192 | 0.266 | – (0 flips) |
+| Qwen3-8B (bf16, Jetson AGX Orin) | 76.7 | 0.838 | 0.238 | 0.242 | 0.169 |
+| Qwen3-14B (bf16, Jetson AGX Orin) | 71.7 | 0.806 | 0.286 | 0.289 | 0.195 |
+| Qwen3-0.6B (bf16, Jetson AGX Orin) | 35.8 | 0.758 | 0.611 | 0.630 | 0.024 |
 | GLM-5.3 | 66.7: constrained but indecisive (p_yes stuck at 0.1–0.6) | | | | |
+
+Verdicts with `qualify`'s default criteria. Qwen3.5-397B, Qwen3.8-27B, Gemma-4-31B and Qwen3.5-9B were run through
+`python -m hunch qualify`; the rest are the same criteria applied to their benchmark numbers. **Qualified**:
+Qwen3.5-397B, Qwen3.8-27B, Gemma-4-31B, and Qwen3.6-35B-A3B on accuracy, calibration and stability (its question-only
+run wasn't measured). **Not qualified**: Qwen3.5-9B (calibration: real positives sit at p≈0.99, but the
+look-alike traps land at a median of 0.42–0.65, so it hedges rather than being confidently wrong); the whole Qwen3
+generation (confidently wrong, and definitions make it *worse*); DeepSeek-V4-Flash (calibration); GLM-5.3.
 
 ### Same benchmark, vague checks
 
@@ -251,10 +267,14 @@ The same 240 pairs with only the `question` ("Does `new` replace `old`'s value f
 | Qwen3.5-397B-A17B | 100.0 | **83.3** | 0.884 | 0.182 |
 | Gemma-4-31B-IT | 98.8 | **80.4** | 0.863 | 0.196 |
 | DeepSeek-V4-Flash (debias on) | 96.2 | **72.1** | 0.932 | 0.329 |
+| Qwen3.8-27B | 99.6 | **80.0** | – | – |
+| Qwen3.5-9B | 90.8 | **81.7** | – | – |
+| Qwen3-8B | 76.7 | **81.2** (definitions hurt) | – | – |
+| Qwen3-14B | 71.7 | **74.6** (definitions hurt) | – | – |
 
-The model and the service are the same; only the definitions changed. Two short definitions (`yes_if` / `no_if`) are worth 17–24
-accuracy points here, more than the difference between any two of these models. Write the definitions first, then
-choose the model.
+The model and the service are the same; only the definitions changed. On every current-generation model, two short
+definitions (`yes_if` / `no_if`) are worth 9–24 accuracy points. The older Qwen3 models go the other way, and that is
+exactly what `qualify`'s "definitions help" check catches. Write the definitions first, then choose the model.
 
 These are results for one synthetic task on our hardware. **Measure on your own labelled cases** before a decision depends on
 Hunch: `python bench/bench.py accuracy <model>` shows how.
@@ -301,6 +321,7 @@ debias = true
 | `HUNCH_BACKEND_MODEL` | Quick single-model setup without a TOML file (exposed as `default`) |
 | `HUNCH_DEFAULT_MODEL` | Overrides `service.default_model` |
 | `HUNCH_CONCURRENCY` | Simultaneous backend calls. Keep it modest on a shared server |
+| `SSL_CERT_FILE` | CA bundle for a backend behind a private or self-signed CA, e.g. `/etc/ssl/certs/ca-certificates.crt` (Python doesn't use the system store by default) |
 | `HUNCH_API_KEYS` | Comma-separated bearer keys. Hunch **refuses** to listen beyond localhost without them (or `HUNCH_ALLOW_NOAUTH=1` behind an authenticating proxy) |
 
 ## Deploying
