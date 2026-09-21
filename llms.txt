@@ -1,0 +1,16 @@
+# Hunch
+
+> Calibrated yes/no, pick-one and scale judgments from your own LLMs, read straight off the logprobs of a
+> single constrained token. One HTTP call, no text to parse, runs on any vLLM OpenAI-compatible server.
+
+- [Agent guide (read this before writing checks)](https://raw.githubusercontent.com/ihubanov/hunch/main/SKILL.md): the API call, the rules for writing checks, thresholds, qualifying a model, and what not to do.
+- [README](https://raw.githubusercontent.com/ihubanov/hunch/main/README.md): quick start, full API reference, why logprobs instead of asking for JSON, benchmark results per model, configuration and deployment.
+- [Look-alike benchmark set](https://raw.githubusercontent.com/ihubanov/hunch/main/hunch/lookalikes.py): the 240 fictional labelled pairs used by `python -m hunch qualify`.
+
+## Quick facts
+
+- Endpoint: `POST /v1/judge` with `context` (string, object or array) and `checks` (your ids -> check).
+- Check kinds: `yesno` (-> `p_yes`), `pick` (1-300 options -> `pick`, `probs`, `confidence`), `scale` (1-10 ordered levels -> `value`, `probs`, `confidence`).
+- Also: `GET /v1/models`, `GET /health`, `python -m hunch selftest`, `python -m hunch qualify <model>`.
+- The highest-value rule: name the look-alike case in `no_if` / option descriptions. Vague checks cost 17-24 accuracy points.
+- Reasoning models are a poor fit: Hunch allows one token with thinking off.

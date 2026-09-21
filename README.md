@@ -357,6 +357,17 @@ debias = true
 - **systemd:** [`deploy/hunch.service`](deploy/hunch.service).
 - After deploying, run `python -m hunch selftest` (or `docker compose exec hunch python -m hunch selftest`).
 
+## For coding agents
+
+[`SKILL.md`](SKILL.md) is a drop-in guide for an agent writing a Hunch integration: the call, the rules for writing
+checks, thresholds, qualifying a model, and what not to do. [`llms.txt`](llms.txt) indexes it for agents that look for
+one. Point your agent at the raw URLs:
+
+```
+https://raw.githubusercontent.com/ihubanov/hunch/main/llms.txt
+https://raw.githubusercontent.com/ihubanov/hunch/main/SKILL.md
+```
+
 ## Development
 
 ```bash
