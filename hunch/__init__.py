@@ -1,2 +1,2 @@
 """Hunch: calibrated yes/no, pick-one and scale judgments from your own LLMs, read straight off the logprobs."""
-__version__ = "1.1.2"
+__version__ = "1.1.3"
