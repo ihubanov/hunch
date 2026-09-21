@@ -194,8 +194,8 @@ From the bundled benchmark (see [Measured](#measured)):
 - **Edge:** a small MoE (Qwen3.6-35B-A3B, 4-bit: 99.6%). It fits on edge hardware and
   suits requests that ask only a few checks.
 - **Position-biased models** (DeepSeek-V4-Flash here) work with `debias = true`, at twice the calls.
-- **Avoid models that stay indecisive when constrained.** GLM-5.3 kept `p_yes` between 0.1 and 0.6 and never cleared a
-  0.9 gate. Run `python -m hunch selftest` and `python bench/bench.py accuracy <model>` before adopting a model.
+- **Reasoning models are a poor fit.** GLM-5.3 stays between 0.1 and 0.6 and never clears a 0.9 gate, yet it reaches
+  98.3% when allowed to think first (see [Reasoning models fail differently](#reasoning-models-fail-differently)). Run `python -m hunch selftest` and `python bench/bench.py accuracy <model>` before adopting a model.
 - **Thinking models must have thinking switched off per request.** Otherwise the one allowed token is spent on
   reasoning. Hunch sends `reasoning_effort: "none"` by default. Some chat templates need
   `chat_template_kwargs = { enable_thinking = false }` in the model's `extra_body` instead (see `hunch.toml.example`).
@@ -260,7 +260,8 @@ Why the others fail:
 - **Qwen3.5-9B:** calibration. Real positives sit at p≈0.99, but the look-alike traps land at a median of 0.42–0.65, so
   it hedges rather than being confidently wrong.
 - **The Qwen3 generation:** confidently wrong, and definitions make it *worse*.
-- **GLM-5.3:** constrained but indecisive (p_yes stuck at 0.1–0.6).
+- **GLM-5.3:** a reasoning model. It's indecisive in one token (p_yes stuck at 0.1–0.6), though it reaches 98.3%
+  when allowed to think first. See [Reasoning models fail differently](#reasoning-models-fail-differently).
 
 ### Same benchmark, vague checks
 
@@ -283,6 +284,26 @@ exactly what `qualify`'s "definitions help" check catches. Write the definitions
 
 These are results for one synthetic task on our hardware. **Measure on your own labelled cases** before a decision depends on
 Hunch: `python bench/bench.py accuracy <model>` shows how.
+
+### Reasoning models fail differently
+
+GLM-5.3 scores 66.7% here, which looks like a weak model. It isn't. Asked the same 60 questions three ways:
+
+| How GLM-5.3 is asked | Accuracy |
+| --- | --- |
+| One constrained token, thinking off (what Hunch does) | 68.3% |
+| One constrained token with word labels (`yes` / `no`) | 65.0% |
+| Allowed to think, then its written answer is read | **98.3%** |
+
+The model knows the answer. It just can't produce it in a single forward pass: it needs to reason first. Its
+one-token answers lean the right way (AUROC 0.74) but sit near 0.5, which is what "hasn't thought yet" looks like.
+Models that qualify here reach the same conclusion immediately, and the probability is visible in that first token.
+
+So Hunch measures something narrower than "is this a good model": **does it know the answer before it starts
+writing?** Reasoning models are a poor fit for this interface, and the fix is not a better prompt. Either pick a model
+that qualifies, or let the reasoning model think and accept what that costs: hundreds of tokens and seconds per
+call instead of one token in well under a second, and a bare verdict with no probability to threshold on, so no
+"unsure" band and nothing to calibrate.
 
 ## Writing good checks
 
