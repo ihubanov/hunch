@@ -96,6 +96,7 @@ model qualifies, and `--json FILE` writes the full report. `--quick` does one na
 | `context` | string, object or array | The data to judge. Use an object with named fields when there are several parts, and refer to them in questions with backticks, e.g. `` `ticket.messages[0]` `` |
 | `checks` | object: id → check | Your own ids; results come back under the same ids |
 | `model` | string, optional | One of the configured models; defaults to `service.default_model` |
+| `effort` | string, optional | Thinking effort for a `deliberate` model on this call only (`low` / `high` / `max`). Ignored by backends without it |
 
 Check kinds:
 
@@ -340,8 +341,21 @@ For exactly these models, Hunch can read the answer differently. Set `mode` on t
 | `auto` | One unconstrained probe at first use: if the first token opens a scratchpad, `deliberate`, else `one_token` | one extra call, once |
 
 Everything downstream is identical — same API, same `probs` and `confidence`, same thresholds, same `qualify`
-criteria. In `deliberate` mode Hunch drops any "don't think" fields (`reasoning_effort`,
-`chat_template_kwargs`) from the request, since thinking is the point.
+criteria. In `deliberate` mode Hunch drops the fields that switch thinking *off* (`reasoning_effort: "none"`,
+`enable_thinking: false`) but keeps real effort levels.
+
+**How long it thinks: `effort`.** On backends that support it (GLM-style `reasoning_effort`), set `effort` per model
+in `hunch.toml`, or per request for one call. More thinking buys stability, and the curve is steep at the cheap end —
+GLM-5.3 on the 240 pairs:
+
+| `effort` | Thinking tokens | Accuracy | ECE | Flips between runs | Qualifies |
+| --- | --- | --- | --- | --- | --- |
+| `low` | ~3 | 94.2% | 0.088 | 4.6% | no (stability) |
+| `high` | ~20 | 96.7% | 0.033 | 2.5% | no (just over) |
+| default (`max`) | ~79 | **97.5%** | **0.025** | **0.8%** | **yes** |
+
+`low` costs barely more than one-token mode, which suits cheap high-volume checks where you re-run or review the
+borderline cases; the default is what belongs behind a 0.9 gate. Measure it on your own task.
 
 `python -m hunch qualify` detects this situation by itself: if a model fails in one-token mode **and** its first
 token opens a scratchpad, it says so, re-runs the model in `deliberate` mode, and reports both, so the trade-off is

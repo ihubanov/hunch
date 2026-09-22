@@ -21,6 +21,9 @@ description = "Most accurate in the bundled benchmark"
 #                      # with no non-thinking mode. Costs think_budget tokens and seconds per check.
 # mode = "auto"        # probe the backend once at first use and pick
 # think_budget = 512   # max thinking tokens in deliberate mode
+# effort = "high"      # GLM-style reasoning_effort: how long it may think. More thinking = stabler
+#                      # answers (GLM on our benchmark: low 94.2% / 4.6% flips, high 96.7% / 2.5%,
+#                      # default 97.5% / 0.8%). Per request too: {"effort": "low"} on /v1/judge.
 
 [models.gemma]
 backend_model = "google/gemma-4-31b-it"
