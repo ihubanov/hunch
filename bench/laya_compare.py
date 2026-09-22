@@ -8,9 +8,8 @@ same 240 labelled pairs, with the same metrics as `python -m hunch qualify`, so 
     python bench/laya_compare.py [--model convaiinnovations/laya] [--device cuda] [--json out.json]
 
 Each pair is one `noul` question. Two variants, as in qualify:
-  named  - the question plus the yes_if / no_if definitions (Laya has no separate criteria fields
-           for noul, so they are appended to the instructions)
-  vague  - the bare question
+  named  - the question plus Laya's native criteria {"true": yes_if, "false": no_if}
+  vague  - the bare question, no criteria
 """
 from __future__ import annotations
 
@@ -27,23 +26,20 @@ from hunch.qualify import (  # noqa: E402
     GATE, Criteria, Report, accuracy_at_gate, auroc, ece, print_report, verdict)
 
 
-def instructions(check: dict, vague: bool) -> str:
-    q = check["question"]
-    if vague or not (check.get("yes_if") or check.get("no_if")):
-        return q
-    parts = [q]
-    if check.get("yes_if"):
-        parts.append(f"Answer yes if: {check['yes_if']}")
-    if check.get("no_if"):
-        parts.append(f"Answer no if: {check['no_if']}")
-    return "\n".join(parts)
+def question_def(check: dict, vague: bool) -> dict:
+    """A Laya noul question. Laya reads `criteria` for every type, so the definitions go there
+    (its docstring lists criteria only for choice/score, but agent._to_internal passes it through)."""
+    q = {"type": "noul", "instructions": check["question"]}
+    if not vague and (check.get("yes_if") or check.get("no_if")):
+        q["criteria"] = {"true": check.get("yes_if"), "false": check.get("no_if")}
+    return q
 
 
 def run(agent, items: list[dict], vague: bool) -> tuple[list[float | None], float]:
     out, t0 = [], time.perf_counter()
     for it in items:
         try:
-            result = agent.predict(it["context"], {"q": {"type": "noul", "instructions": instructions(it["check"], vague)}})
+            result = agent.predict(it["context"], {"q": question_def(it["check"], vague)})
             answer = result["answers"]["q"]
             out.append(float(answer["noul"] if isinstance(answer, dict) and "noul" in answer else answer))
         except Exception as e:  # noqa: BLE001

@@ -7,8 +7,13 @@ from __future__ import annotations
 
 import os
 import pathlib
-import tomllib
+
 from dataclasses import dataclass, field
+
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:  # pragma: no cover - 3.10 fallback
+    import tomli as tomllib
 
 
 @dataclass(frozen=True)
