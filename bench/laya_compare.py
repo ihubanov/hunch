@@ -35,11 +35,19 @@ def question_def(check: dict, vague: bool) -> dict:
     return q
 
 
-def run(agent, items: list[dict], vague: bool) -> tuple[list[float | None], float]:
+SEMANTIC_KEYS = {"old": "old_assertion", "new": "new_assertion", "a": "assertion_a", "b": "assertion_b"}
+
+
+def context_of(it: dict, semantic: bool) -> dict:
+    ctx = it["context"]
+    return {SEMANTIC_KEYS.get(k, k): v for k, v in ctx.items()} if semantic and isinstance(ctx, dict) else ctx
+
+
+def run(agent, items: list[dict], vague: bool, semantic: bool = False) -> tuple[list[float | None], float]:
     out, t0 = [], time.perf_counter()
     for it in items:
         try:
-            result = agent.predict(it["context"], {"q": question_def(it["check"], vague)})
+            result = agent.predict(context_of(it, semantic), {"q": question_def(it["check"], vague)})
             answer = result["answers"]["q"]
             out.append(float(answer["noul"] if isinstance(answer, dict) and "noul" in answer else answer))
         except Exception as e:  # noqa: BLE001
@@ -54,6 +62,9 @@ def main() -> int:
     ap.add_argument("--device", default=None, help="cuda / cpu / mps (default: the library's choice)")
     ap.add_argument("--runs", type=int, default=2, help="repeats of the named variant, for the stability check")
     ap.add_argument("--json", dest="json_path")
+    ap.add_argument("--semantic-keys", action="store_true",
+                    help="rename the context keys old/new -> old_assertion/new_assertion and a/b -> "
+                         "assertion_a/assertion_b, as recommended in NandhaKishorM/laya#135")
     a = ap.parse_args()
 
     import laya  # noqa: PLC0415  (imported here so --help works without the dependency)
@@ -64,15 +75,16 @@ def main() -> int:
     load_s = time.perf_counter() - t0
     items = build()
     labels = [it["label"] for it in items]
-    print(f"{a.model} loaded in {load_s:.1f}s; {len(items)} labelled pairs")
+    print(f"{a.model} loaded in {load_s:.1f}s; {len(items)} labelled pairs"
+          f"{'; semantic context keys' if a.semantic_keys else ''}")
 
     runs, per_item_ms = [], None
     for i in range(a.runs):
-        ps, ms = run(agent, items, vague=False)
+        ps, ms = run(agent, items, vague=False, semantic=a.semantic_keys)
         runs.append(ps)
         per_item_ms = ms if per_item_ms is None else per_item_ms
         print(f"  named run {i + 1}/{a.runs}: {ms:.0f} ms per question")
-    vague_ps, vague_ms = run(agent, items, vague=True)
+    vague_ps, vague_ms = run(agent, items, vague=True, semantic=a.semantic_keys)
     print(f"  vague run: {vague_ms:.0f} ms per question")
 
     scored = [(p, y) for p, y in zip(runs[0], labels) if p is not None]
