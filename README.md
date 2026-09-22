@@ -197,8 +197,9 @@ From the bundled benchmark (see [Measured](#measured)):
 - **Edge:** a small MoE (Qwen3.6-35B-A3B, 4-bit: 99.6%). It fits on edge hardware and
   suits requests that ask only a few checks.
 - **Position-biased models** (DeepSeek-V4-Flash here) work with `debias = true`, at twice the calls.
-- **Reasoning models are a poor fit.** GLM-5.3 stays between 0.1 and 0.6 and never clears a 0.9 gate, yet it reaches
-  98.3% when allowed to think first (see [Reasoning models fail differently](#reasoning-models-fail-differently)). Run `python -m hunch selftest` and `python bench/bench.py accuracy <model>` before adopting a model.
+- **Check the model has a real non-thinking mode.** GLM-5.3 has none: its template always opens a thinking block, so
+  its first token is never an answer and it never clears a 0.9 gate — though it reaches 96.7% with ECE 0.033 when
+  allowed to think (see [Models with no non-thinking mode](#models-with-no-non-thinking-mode)). Run `python -m hunch selftest` and `python bench/bench.py accuracy <model>` before adopting a model.
 - **Thinking models must have thinking switched off per request.** Otherwise the one allowed token is spent on
   reasoning. Hunch sends `reasoning_effort: "none"` by default. Some chat templates need
   `chat_template_kwargs = { enable_thinking = false }` in the model's `extra_body` instead (see `hunch.toml.example`).
@@ -263,8 +264,8 @@ Why the others fail:
 - **Qwen3.5-9B:** calibration. Real positives sit at p≈0.99, but the look-alike traps land at a median of 0.42–0.65, so
   it hedges rather than being confidently wrong.
 - **The Qwen3 generation:** confidently wrong, and definitions make it *worse*.
-- **GLM-5.3:** a reasoning model. It's indecisive in one token (p_yes stuck at 0.1–0.6), though it reaches 98.3%
-  when allowed to think first. See [Reasoning models fail differently](#reasoning-models-fail-differently).
+- **GLM-5.3:** has no non-thinking mode, so its first token opens a scratchpad rather than answering. It reaches
+  96.7% (ECE 0.033) when allowed to think. See [Models with no non-thinking mode](#models-with-no-non-thinking-mode).
 
 ### Same benchmark, vague checks
 
@@ -288,25 +289,45 @@ exactly what `qualify`'s "definitions help" check catches. Write the definitions
 These are results for one synthetic task on our hardware. **Measure on your own labelled cases** before a decision depends on
 Hunch: `python bench/bench.py accuracy <model>` shows how.
 
-### Reasoning models fail differently
+### Models with no non-thinking mode
 
-GLM-5.3 scores 66.7% here, which looks like a weak model. It isn't. Asked the same 60 questions three ways:
+GLM-5.3 scores 66.7% here, which looks like a weak model. It isn't — we were measuring the wrong thing.
 
-| How GLM-5.3 is asked | Accuracy |
-| --- | --- |
-| One constrained token, thinking off (what Hunch does) | 68.3% |
-| One constrained token with word labels (`yes` / `no`) | 65.0% |
-| Allowed to think, then its written answer is read | **98.3%** |
+**GLM-5.3 has no non-thinking mode.** Its chat template always appends a thinking block to the generation prompt, so
+the first generated token is the model *opening a scratchpad*, never an answer. Constraining that position to `Y`/`N`
+projects a distribution that isn't about the verdict onto two tokens. The result looks exactly like what we measured:
+probabilities pinned near 0.5, unstable between identical runs (52 of 240 answers flipped), and very sensitive to how
+the prompt is built. There is no flag that avoids this: the GLM-4.x thinking toggle was removed, and
+`reasoning_effort: "none"` is not a recognised value — it falls through to *maximum* reasoning while also switching
+the server's reasoning parser off.
 
-The model knows the answer. It just can't produce it in a single forward pass: it needs to reason first. Its
-one-token answers lean the right way (AUROC 0.74) but sit near 0.5, which is what "hasn't thought yet" looks like.
-Models that qualify here reach the same conclusion immediately, and the probability is visible in that first token.
+Let the same model think, and constrain only its final verdict token, and it is excellent:
 
-So Hunch measures something narrower than "is this a good model": **does it know the answer before it starts
-writing?** Reasoning models are a poor fit for this interface, and the fix is not a better prompt. Either pick a model
-that qualifies, or let the reasoning model think and accept what that costs: hundreds of tokens and seconds per
-call instead of one token in well under a second, and a bare verdict with no probability to threshold on, so no
-"unsure" band and nothing to calibrate.
+| How GLM-5.3 is asked | Accuracy | AUROC | ECE |
+| --- | --- | --- | --- |
+| One constrained token (what Hunch does today) | 68.3% | 0.736 | – |
+| Thinking, then the probability read from its constrained verdict token | **96.7%** | **0.975** | **0.033** |
+
+That second row would qualify comfortably. It costs about 122 thinking tokens and a few seconds per decision instead
+of one token in well under a second — roughly 100× the tokens for +28 points on this task.
+
+**What to take from this:**
+
+- **Hunch measures something narrow:** does the model have an answer *at the first generated token*? A model whose
+  template always starts with a scratchpad cannot, whatever its ability.
+- **The symptom is recognisable.** Probabilities clustered near 0.5, unstable between identical runs and moving a lot
+  when you reshape the prompt, mean you are reading a position that isn't the answer — not that the model is weak.
+  Check whether your model has a real non-thinking mode before blaming it.
+- **A reasoning model can still give you a calibrated probability.** Let it think, constrain the final answer to your
+  labels, and read the logprobs of that token. Hunch does not do this today (see
+  [Deliberate mode](#deliberate-mode-not-implemented)), but nothing about the approach forbids it.
+
+### Deliberate mode (not implemented)
+
+The measurement above suggests an obvious second mode: let the backend think, constrain the verdict, and read the
+probability from that token. Same API, same thresholds, same `qualify` criteria — but hundreds of tokens and seconds
+per decision instead of one token in well under a second. It would turn models that have no non-thinking mode from
+unusable into the most accurate option available. It is not built; if you want it, open an issue.
 
 ## Writing good checks
 
