@@ -91,6 +91,11 @@ def main() -> int:
     r = Report(model=f"laya:{a.model}", backend_model=a.model)
     r.accuracy = round(accuracy_at_gate(runs[0], labels), 1)
     r.accuracy_vague = round(accuracy_at_gate(vague_ps, labels), 1)
+    scored_vague = [(p, y) for p, y in zip(vague_ps, labels) if p is not None]
+    if scored_vague:
+        r.auroc_vague = round(auroc(scored_vague), 3)
+        r.brier_vague = round(statistics.mean((p - y) ** 2 for p, y in scored_vague), 3)
+        r.ece_vague = round(ece(scored_vague), 3)
     r.auroc = round(auroc(scored), 3)
     r.brier = round(statistics.mean((p - y) ** 2 for p, y in scored), 3)
     r.ece = round(ece(scored), 3)

@@ -32,7 +32,10 @@ class ModelSpec:
     #                scratchpad instead of answering. Costs think_budget tokens and seconds per check.
     # "auto"       - probe the backend once and pick
     mode: str = "one_token"
-    think_budget: int = 512   # max tokens the model may think for in deliberate mode
+    # Hard cap, not a knob: it does not shorten thinking, it only cuts it off, and a cut-off call
+    # raises rather than guessing. Measured on GLM at default effort: median 128, p95 671, max 3579.
+    # With `effort` set the tail collapses (low: max 59, high: max 138), so 256 is plenty there.
+    think_budget: int = 2048
     # How long the model may think in deliberate mode, if the backend supports it ("low" / "high" /
     # "max" on GLM-style models). Sent as reasoning_effort. More thinking buys stability: on our
     # benchmark GLM went 94.2% / 4.6% flips at "low" to 97.5% / 0.8% flips at the default.

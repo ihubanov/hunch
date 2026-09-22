@@ -337,7 +337,7 @@ For exactly these models, Hunch can read the answer differently. Set `mode` on t
 | `mode` | What happens | Cost per check |
 | --- | --- | --- |
 | `one_token` (default) | The answer is the first generated token | 1 token, well under a second |
-| `deliberate` | The model thinks; only its final verdict token is constrained, and that token's logprobs give the probability | `think_budget` tokens (512 by default) and seconds |
+| `deliberate` | The model thinks; only its final verdict token is constrained, and that token's logprobs give the probability | up to `think_budget` tokens (2048 by default) and seconds |
 | `auto` | One unconstrained probe at first use: if the first token opens a scratchpad, `deliberate`, else `one_token` | one extra call, once |
 
 Everything downstream is identical — same API, same `probs` and `confidence`, same thresholds, same `qualify`
@@ -356,6 +356,12 @@ GLM-5.3 on the 240 pairs:
 
 `low` costs barely more than one-token mode, which suits cheap high-volume checks where you re-run or review the
 borderline cases; the default is what belongs behind a 0.9 gate. Measure it on your own task.
+
+**`think_budget` is a cap, not a knob.** Raising it does not make the model think longer, and lowering it does not
+make it think less — it only decides whether a long answer arrives or the call raises. Measured on GLM at default
+effort: median 128 thinking tokens, p95 671, max 3579, so a 512 cap truncated 3% of checks. With `effort` set the
+tail collapses (`low` max 59, `high` max 138) and 256 is plenty. Size it above your p99 and control cost with
+`effort`.
 
 `python -m hunch qualify` detects this situation by itself: if a model fails in one-token mode **and** its first
 token opens a scratchpad, it says so, re-runs the model in `deliberate` mode, and reports both, so the trade-off is
