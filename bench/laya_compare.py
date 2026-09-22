@@ -16,11 +16,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import pathlib
 import statistics
+import sys
 import time
 
-from hunch.lookalikes import build
-from hunch.qualify import GATE, Criteria, Report, accuracy_at_gate, auroc, ece, print_report, verdict
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))  # run from a checkout without installing
+from hunch.lookalikes import build  # noqa: E402
+from hunch.qualify import (  # noqa: E402
+    GATE, Criteria, Report, accuracy_at_gate, auroc, ece, print_report, verdict)
 
 
 def instructions(check: dict, vague: bool) -> str:
