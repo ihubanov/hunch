@@ -186,6 +186,9 @@ From the bundled benchmark (see [Measured](#measured)):
 
 - **Most accurate:** a large instruct model (Qwen3.5-397B: 100%). Use it for decisions where errors are costly.
 - **Best mid-size:** Qwen3.8-27B (99.6%, calibration error 0.058). It qualifies comfortably on a single GPU.
+- **Why not a small purpose-trained decision model?** We measured one (Laya, 322M-421M, Apache-2.0):
+  on this benchmark its best checkpoint reaches 68.8% and is ~2.3x faster than a 9B LLM on the same GPU.
+  Method, numbers and caveats: [docs/COMPARISON-laya.md](docs/COMPARISON-laya.md).
 - **Generation beats size.** Every Qwen3-generation model failed (Qwen3-14B scored *below* Qwen3-8B), while the newer
   Qwen3.5+ models pass. The small Qwen3.5-9B ranks almost perfectly (AUROC 0.996) but hedges on look-alikes, so use it
   only with a strict act threshold (≥ 0.97) and human review below that.
