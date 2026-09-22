@@ -55,6 +55,9 @@ class Report:
     accuracy_vague: float | None = None
     auroc: float | None = None
     brier: float | None = None
+    auroc_vague: float | None = None     # same metrics for the question-only run, for comparison
+    brier_vague: float | None = None
+    ece_vague: float | None = None
     ece: float | None = None
     flip_rate: float | None = None
     errors: int = 0
@@ -150,6 +153,11 @@ async def qualify_model(engine: Engine, client: httpx.AsyncClient, name: str, se
         return r
     r.accuracy = round(accuracy_at_gate(run1, labels), 1)
     r.accuracy_vague = round(accuracy_at_gate(run_vague, labels), 1)
+    scored_vague = [(p, y) for p, y in zip(run_vague, labels) if p is not None]
+    if scored_vague:
+        r.auroc_vague = round(auroc(scored_vague), 3)
+        r.brier_vague = round(statistics.mean((p - y) ** 2 for p, y in scored_vague), 3)
+        r.ece_vague = round(ece(scored_vague), 3)
     r.auroc = round(auroc(scored), 3)
     r.brier = round(statistics.mean((p - y) ** 2 for p, y in scored), 3)
     r.ece = round(ece(scored), 3)
@@ -169,7 +177,8 @@ def print_report(r: Report, c: Criteria) -> None:
     if r.accuracy is not None:
         fmt = lambda v, f: "-" if v is None else format(v, f)  # noqa: E731
         print(f"   accuracy @{GATE}: {r.accuracy:.1f}%   (min {c.min_accuracy:g}%)")
-        print(f"   question only:    {fmt(r.accuracy_vague, '.1f')}%   (definitions must not make it worse)")
+        print(f"   question only:    {fmt(r.accuracy_vague, '.1f')}%   (definitions must not make it worse)"
+              f"   AUROC {fmt(r.auroc_vague, '.3f')}   Brier {fmt(r.brier_vague, '.3f')}   ECE {fmt(r.ece_vague, '.3f')}")
         print(f"   calibration ECE:  {fmt(r.ece, '.3f')}   (max {c.max_ece:g})   AUROC {fmt(r.auroc, '.3f')}   Brier {fmt(r.brier, '.3f')}")
         print(f"   flips between runs: {'-' if r.flip_rate is None else f'{100 * r.flip_rate:.1f}%'}   (max {100 * c.max_flip_rate:g}%)")
     for reason in r.reasons:

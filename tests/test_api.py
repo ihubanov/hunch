@@ -439,3 +439,17 @@ def test_empty_or_foreign_verdict_token_is_rejected_not_crashed(token):
         return None, None
 
     assert asyncio.run(go()) == ("backend_error", 502)
+
+
+def test_qualify_records_metrics_for_the_vague_run_too():
+    import asyncio
+
+    async def go():
+        transport, _ = fake_backend()
+        async with httpx.AsyncClient(transport=transport) as client:
+            return await qualify_model(Engine(SETTINGS, client), client, "fast", {"org/fast-model"}, {}, Criteria(),
+                                       quick=True, progress=lambda *_: None)
+
+    r = asyncio.run(go())
+    assert r.accuracy_vague is not None
+    assert r.auroc_vague is not None and r.brier_vague is not None and r.ece_vague is not None

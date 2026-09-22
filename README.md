@@ -272,7 +272,8 @@ Why the others fail:
 ### Same benchmark, vague checks
 
 The same 240 pairs with only the `question` ("Does `new` replace `old`'s value for the SAME thing?"), with no `yes_if` /
-`no_if` (`python bench/bench.py accuracy --vague <model>`):
+`no_if` (`python bench/bench.py accuracy --vague <model>`). A dash means the row came from `python -m hunch qualify`,
+which until v1.2.1 recorded only accuracy for its question-only run; those backends are no longer up to re-measure.
 
 | Model | Verdict | Accuracy, look-alikes named | Accuracy, question only | AUROC, question only | Brier, question only |
 | --- | --- | --- | --- | --- | --- |
