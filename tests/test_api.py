@@ -37,7 +37,8 @@ def fake_backend(prose=False, fail_first=0, status=504, scratchpad=False, think_
         body = json.loads(request.content)
         if "structured_outputs" not in body:          # the unconstrained scratchpad probe
             state["probes"] += 1
-            content = "<think>" if scratchpad else "yes"
+            # a model with no non-thinking mode leaks its scratchpad into content (vLLM #54744)
+            content = "The user is asking me to reply with exactly one word" if scratchpad else "yes"
             return httpx.Response(200, json={"choices": [{"message": {"content": content}}],
                                              "usage": {"prompt_tokens": 10, "completion_tokens": 1}})
         state["bodies"].append(body)
@@ -334,10 +335,33 @@ def test_detects_a_model_with_no_non_thinking_mode():
     async def go(scratchpad):
         engine, state = _engine(scratchpad=scratchpad)
         async with engine.client:
-            return await engine.opens_scratchpad(SETTINGS.models["fast"]), state["probes"]
+            return await engine.opens_scratchpad(SETTINGS.models["fast"]), state["probes"], state["bodies"]
 
-    assert asyncio.run(go(True)) == (True, 1)
-    assert asyncio.run(go(False)) == (False, 1)
+    leaked, probes, _ = asyncio.run(go(True))       # scratchpad leaked into content
+    answers, _, _ = asyncio.run(go(False))          # model answers the question
+    assert (leaked, answers, probes) == (True, False, 1)
+
+
+@pytest.mark.parametrize("message,expected", [
+    ({"content": "yes"}, False),
+    ({"content": "Yes."}, False),
+    ({"content": '"yes"'}, False),
+    ({"content": "", "reasoning": "The user is asking..."}, True),          # vLLM 0.29.0 field
+    ({"content": "", "reasoning_content": "The user is asking..."}, True),  # older builds
+    ({"content": "The user is asking me to reply"}, True),                  # leaked scratchpad
+    ({"content": ""}, True),
+])
+def test_scratchpad_probe_reads_both_reasoning_fields(message, expected):
+    import asyncio
+
+    def handler(request):
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", **message}}]})
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await Engine(SETTINGS, client).opens_scratchpad(SETTINGS.models["fast"])
+
+    assert asyncio.run(go()) is expected
 
 
 def test_auto_mode_picks_deliberate_and_caches_the_probe():
@@ -391,3 +415,27 @@ def test_one_token_mode_is_unchanged_and_sends_max_tokens_1():
     assert body["max_tokens"] == 1
     assert body["reasoning_effort"] == "none"            # kept in one-token mode
     assert probes == 0                                   # no probe unless mode="auto"
+
+
+@pytest.mark.parametrize("token", ["", " ", "The"])
+def test_empty_or_foreign_verdict_token_is_rejected_not_crashed(token):
+    """'' in "YN" is True in Python (substring!), so an empty token must be rejected explicitly."""
+    import asyncio
+    from hunch.engine import HunchError
+
+    def handler(request):
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": token},
+                         "logprobs": {"content": [{"token": token, "logprob": 0.0, "top_logprobs": []}]}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}})
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            try:
+                await Engine(SETTINGS, client).judge(SETTINGS.models["fast"], "ctx",
+                                                     {"q": {"kind": "yesno", "question": "x"}})
+            except HunchError as e:
+                return e.code, e.status
+        return None, None
+
+    assert asyncio.run(go()) == ("backend_error", 502)

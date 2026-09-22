@@ -198,8 +198,8 @@ From the bundled benchmark (see [Measured](#measured)):
   suits requests that ask only a few checks.
 - **Position-biased models** (DeepSeek-V4-Flash here) work with `debias = true`, at twice the calls.
 - **Check the model has a real non-thinking mode.** GLM-5.3 has none: its template always opens a thinking block, so
-  its first token is never an answer and it never clears a 0.9 gate — though it reaches 96.7% with ECE 0.033 when
-  allowed to think (see [Models with no non-thinking mode](#models-with-no-non-thinking-mode)). Run `python -m hunch selftest` and `python bench/bench.py accuracy <model>` before adopting a model.
+  its first token is never an answer. Run it with `mode = "deliberate"` and it qualifies at 97.5% (ECE 0.025); leave
+  it in one-token mode and it scores 66.7% (see [Models with no non-thinking mode](#models-with-no-non-thinking-mode)). Run `python -m hunch selftest` and `python bench/bench.py accuracy <model>` before adopting a model.
 - **Thinking models must have thinking switched off per request.** Otherwise the one allowed token is spent on
   reasoning. Hunch sends `reasoning_effort: "none"` by default. Some chat templates need
   `chat_template_kwargs = { enable_thinking = false }` in the model's `extra_body` instead (see `hunch.toml.example`).
@@ -251,7 +251,8 @@ value, or is about a different thing"*). Results on vLLM (NVFP4 checkpoints unle
 | Qwen3.5-9B (bf16) | ❌ Not qualified | 90.8 | 0.996 | 0.192 | 0.266 | – (0 flips) |
 | Qwen3-8B (bf16) | ❌ Not qualified | 76.7 | 0.838 | 0.238 | 0.242 | 0.169 |
 | Qwen3-14B (bf16) | ❌ Not qualified | 71.7 | 0.806 | 0.286 | 0.289 | 0.195 |
-| GLM-5.3 | ❌ Not qualified | 66.7 | – | – | – | – |
+| GLM-5.3 (`mode = "deliberate"`) | ✅ Qualified | 97.5 | 0.977 | 0.025 | 0.025 | – (0.8% flips) |
+| GLM-5.3 (`mode = "one_token"`) | ❌ Not qualified | 66.7 | 0.734 | 0.194 | 0.065 | – (9.2% flips) |
 | Qwen3-0.6B (bf16) | ❌ Not qualified | 35.8 | 0.758 | 0.611 | 0.630 | 0.024 |
 
 Verdicts use `python -m hunch qualify`'s default criteria (accuracy ≥ 90%, ECE ≤ 0.15, definitions must not hurt,
@@ -264,8 +265,9 @@ Why the others fail:
 - **Qwen3.5-9B:** calibration. Real positives sit at p≈0.99, but the look-alike traps land at a median of 0.42–0.65, so
   it hedges rather than being confidently wrong.
 - **The Qwen3 generation:** confidently wrong, and definitions make it *worse*.
-- **GLM-5.3:** has no non-thinking mode, so its first token opens a scratchpad rather than answering. It reaches
-  96.7% (ECE 0.033) when allowed to think. See [Models with no non-thinking mode](#models-with-no-non-thinking-mode).
+- **GLM-5.3 in one-token mode:** it has no non-thinking mode, so its first token opens a scratchpad rather than
+  answering. In `mode = "deliberate"` the same model qualifies at 97.5% with ECE 0.025. See
+  [Models with no non-thinking mode](#models-with-no-non-thinking-mode).
 
 ### Same benchmark, vague checks
 
@@ -303,13 +305,14 @@ the server's reasoning parser off.
 
 Let the same model think, and constrain only its final verdict token, and it is excellent:
 
-| How GLM-5.3 is asked | Accuracy | AUROC | ECE |
-| --- | --- | --- | --- |
-| One constrained token (what Hunch does today) | 68.3% | 0.736 | – |
-| Thinking, then the probability read from its constrained verdict token | **96.7%** | **0.975** | **0.033** |
+| How GLM-5.3 is asked | Accuracy | AUROC | ECE | Flips | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| One constrained token (`mode = "one_token"`) | 66.7% | 0.734 | 0.065 | 9.2% | ❌ |
+| Thinking first, verdict token constrained (`mode = "deliberate"`) | **97.5%** | **0.977** | **0.025** | 0.8% | ✅ |
 
-That second row would qualify comfortably. It costs about 122 thinking tokens and a few seconds per decision instead
-of one token in well under a second — roughly 100× the tokens for +28 points on this task.
+Same model, same server, same 240 pairs. It costs hundreds of thinking tokens and seconds per decision instead of
+one token in well under a second — and with a 512-token budget a few checks never reach a verdict, so
+`think_budget = 1024` is the setting that qualified.
 
 **What to take from this:**
 

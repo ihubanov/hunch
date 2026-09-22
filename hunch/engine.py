@@ -17,6 +17,7 @@ from . import prompts
 from .config import ModelSpec, Settings
 
 MODES = ("one_token", "deliberate", "auto")
+PROBE_MAX_TOKENS = 16   # enough to tell an answer from the start of a scratchpad
 # Request fields that ask a model not to think. Removed in deliberate mode, where thinking is the point.
 THINKING_OFF_KEYS = ("reasoning_effort", "chat_template_kwargs")
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -136,44 +137,51 @@ class Engine:
         return self._detected[spec.name]
 
     async def opens_scratchpad(self, spec: ModelSpec) -> bool:
-        """True when the model's FIRST generated token opens a thinking block rather than answering.
+        """True when the model starts thinking instead of answering, i.e. it has no non-thinking mode.
 
-        Such models (GLM-5.3, for one) have no non-thinking mode: their chat template always starts a
-        scratchpad, so constraining the first token to a label reads a distribution that is not about the
-        answer. One unconstrained max_tokens=1 call is enough to see it.
+        Such models (GLM-5.3, for one) append a thinking block to every generation prompt, so constraining
+        the FIRST token to a label reads a distribution that is not about the answer. The probe asks for a
+        one-word answer without any constraint and checks whether one arrives:
+
+          - thinking text in `reasoning` / `reasoning_content` -> it is thinking
+          - the scratchpad leaking into `content` instead of the answer -> it is thinking
+            (vLLM issue #54744: the parser is gated on kwargs some templates never read)
+          - anything that is not the requested word -> treat as thinking
+
+        A single token is not enough to tell: GLM returns just "The" there, which looks like an answer.
         """
         body = {"model": spec.backend_model,
                 "messages": [{"role": "user", "content": "Reply with exactly one word: yes"}],
-                "max_tokens": 1, "temperature": 0, **spec.extra_body}
+                "max_tokens": PROBE_MAX_TOKENS, "temperature": 0, **spec.extra_body}
         headers = {"Authorization": f"Bearer {self.s.backend_api_key}"} if self.s.backend_api_key else {}
         try:
             async with self.sem:
                 r = await self.client.post(f"{self.s.backend_url}/v1/chat/completions", json=body,
                                            headers=headers, timeout=self.s.timeout_s)
             if r.status_code != 200:
-                return False
+                return False        # can't tell; assume the cheap mode rather than force the expensive one
             msg = r.json()["choices"][0].get("message") or {}
         except (httpx.TimeoutException, httpx.TransportError):
             return False
-        if (msg.get("reasoning_content") or msg.get("reasoning") or "").strip():
-            return True
-        content = (msg.get("content") or "").strip().lower()
-        return "think" in content or content.startswith("<")
+        if (msg.get("reasoning") or msg.get("reasoning_content") or "").strip():
+            return True             # 0.29.0 uses `reasoning`; older builds use `reasoning_content`
+        return not (msg.get("content") or "").strip().lower().lstrip('"\'*_ ').startswith("yes")
 
     @staticmethod
     def _parse(data: dict, labels: str, deliberate: bool = False) -> tuple[dict[str, float], Usage]:
+        allowed = set(labels)   # NOT `in labels`: "" is a substring of every string
         try:
             toks = data["choices"][0]["logprobs"]["content"]
             # one_token: the answer IS the first token. deliberate: the model thinks first, so the
             # verdict is the last token that is one of the labels.
-            tok = next((t for t in reversed(toks) if str(t.get("token", "")).strip() in labels)) if deliberate else toks[0]
+            tok = next((t for t in reversed(toks) if str(t.get("token", "")).strip() in allowed)) if deliberate else toks[0]
         except (KeyError, IndexError, TypeError, StopIteration):
             if deliberate:
                 raise HunchError(502, "backend_error",
                                  "no constrained verdict token within think_budget; raise it or use mode=one_token")
             raise HunchError(502, "backend_error", "backend returned no logprobs")
         chosen = str(tok.get("token", "")).strip()
-        if chosen not in labels:
+        if chosen not in allowed:
             # The constraint did not reach the model: fail loudly, never derive a probability from an unrelated token.
             raise HunchError(502, "backend_error",
                              f"backend answered {chosen!r}, not one of {list(labels)}; it does not enforce structured_outputs")
