@@ -278,15 +278,19 @@ The same 240 pairs with only the `question` ("Does `new` replace `old`'s value f
 | --- | --- | --- | --- | --- | --- |
 | Qwen3.5-397B-A17B | ✅ Qualified | 100.0 | **83.3** | 0.884 | 0.182 |
 | Qwen3.8-27B | ✅ Qualified | 99.6 | **80.0** | – | – |
+| GLM-5.3 (`mode = "deliberate"`) | ✅ Qualified | 97.5 | **81.2** | – | – |
 | Gemma-4-31B-IT | ✅ Qualified | 98.8 | **80.4** | 0.863 | 0.196 |
 | DeepSeek-V4-Flash (debias on) | ❌ Not qualified | 96.2 | **72.1** | 0.932 | 0.329 |
 | Qwen3.5-9B | ❌ Not qualified | 90.8 | **81.7** | – | – |
 | Qwen3-8B | ❌ Not qualified | 76.7 | **81.2** (definitions hurt) | – | – |
 | Qwen3-14B | ❌ Not qualified | 71.7 | **74.6** (definitions hurt) | – | – |
+| GLM-5.3 (`mode = "one_token"`) | ❌ Not qualified | 66.7 | **67.5** (definitions hurt) | – | – |
 
-The model and the service are the same; only the definitions changed. On every current-generation model, two short
-definitions (`yes_if` / `no_if`) are worth 9–24 accuracy points. The older Qwen3 models go the other way, and that is
-exactly what `qualify`'s "definitions help" check catches. Write the definitions first, then choose the model.
+The model and the service are the same; only the definitions changed. On every model that can answer the question at
+all, two short definitions (`yes_if` / `no_if`) are worth 9–24 accuracy points. Definitions go the other way on the
+older Qwen3 models, and on GLM-5.3 in one-token mode — where nothing in the prompt can help, because the token being
+read is not an answer. The same GLM in `deliberate` mode gains 16 points from them. That contrast is exactly what
+`qualify`'s "definitions help" check is for. Write the definitions first, then choose the model.
 
 These are results for one synthetic task on our hardware. **Measure on your own labelled cases** before a decision depends on
 Hunch: `python bench/bench.py accuracy <model>` shows how.
