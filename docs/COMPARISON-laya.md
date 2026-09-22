@@ -110,6 +110,25 @@ pairs, same machine:
 The handicap was real and worth about 3 points; the control variant was unchanged, as it should be.
 Correcting it did not change any verdict. The current script uses the native field.
 
+## A suggestion from the project, tested
+
+A reply on [our issue](https://github.com/NandhaKishorM/laya/issues/135) suggested our context keys were
+suboptimal: we used bare `{"old": ..., "new": ...}`, and descriptive keys such as
+`{"old_assertion": ..., "new_assertion": ...}` were recommended so the tokenizer keeps field boundaries.
+Same 240 pairs, same machine, `bench/laya_compare.py --semantic-keys`:
+
+| Checkpoint | Accuracy (named) | Accuracy (vague) | AUROC | ECE |
+| --- | --- | --- | --- | --- |
+| `laya-typed-decisions`, bare keys | 68.8 | 66.7 | 0.759 | 0.207 |
+| `laya-typed-decisions`, descriptive keys | 68.8 | 66.7 | 0.734 | 0.204 |
+| `laya`, bare keys | 72.1 | 72.5 | 0.757 | 0.331 |
+| `laya`, descriptive keys | 67.5 | 72.1 | 0.691 | 0.304 |
+
+It does not help here. On the purpose-built checkpoint the verdict-relevant numbers are unchanged and ranking is
+slightly worse; on the English checkpoint accuracy and ranking are clearly worse. The largest movement any key
+naming produced is about 4.6 points, against a 21-point gap to the qualification gate. Both runs were deterministic
+with no errors, and the flag is in the repo so either variant can be reproduced.
+
 ## Caveats
 
 - **One benchmark, and it's ours.** These pairs are deliberately adversarial about near-identical
