@@ -26,6 +26,13 @@ class ModelSpec:
     # Ask yes/no checks in both answer orders and small picks in both option orders, then average.
     # Cancels position bias for models that favour the first-listed answer (costs 2x calls).
     debias: bool = False
+    # "one_token"  - the answer is the first generated token (default; one token per check)
+    # "deliberate" - let the model think, constrain only its final verdict token, read that token's
+    #                logprobs. For models with no non-thinking mode, whose first token opens a
+    #                scratchpad instead of answering. Costs think_budget tokens and seconds per check.
+    # "auto"       - probe the backend once and pick
+    mode: str = "one_token"
+    think_budget: int = 512   # max tokens the model may think for in deliberate mode
 
 
 @dataclass(frozen=True)

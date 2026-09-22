@@ -319,15 +319,25 @@ of one token in well under a second — roughly 100× the tokens for +28 points 
   when you reshape the prompt, mean you are reading a position that isn't the answer — not that the model is weak.
   Check whether your model has a real non-thinking mode before blaming it.
 - **A reasoning model can still give you a calibrated probability.** Let it think, constrain the final answer to your
-  labels, and read the logprobs of that token. Hunch does not do this today (see
-  [Deliberate mode](#deliberate-mode-not-implemented)), but nothing about the approach forbids it.
+  labels, and read the logprobs of that token. That is what [`mode = "deliberate"`](#deliberate-mode) does.
 
-### Deliberate mode (not implemented)
+### Deliberate mode
 
-The measurement above suggests an obvious second mode: let the backend think, constrain the verdict, and read the
-probability from that token. Same API, same thresholds, same `qualify` criteria — but hundreds of tokens and seconds
-per decision instead of one token in well under a second. It would turn models that have no non-thinking mode from
-unusable into the most accurate option available. It is not built; if you want it, open an issue.
+For exactly these models, Hunch can read the answer differently. Set `mode` on the model in `hunch.toml`:
+
+| `mode` | What happens | Cost per check |
+| --- | --- | --- |
+| `one_token` (default) | The answer is the first generated token | 1 token, well under a second |
+| `deliberate` | The model thinks; only its final verdict token is constrained, and that token's logprobs give the probability | `think_budget` tokens (512 by default) and seconds |
+| `auto` | One unconstrained probe at first use: if the first token opens a scratchpad, `deliberate`, else `one_token` | one extra call, once |
+
+Everything downstream is identical — same API, same `probs` and `confidence`, same thresholds, same `qualify`
+criteria. In `deliberate` mode Hunch drops any "don't think" fields (`reasoning_effort`,
+`chat_template_kwargs`) from the request, since thinking is the point.
+
+`python -m hunch qualify` detects this situation by itself: if a model fails in one-token mode **and** its first
+token opens a scratchpad, it says so, re-runs the model in `deliberate` mode, and reports both, so the trade-off is
+visible rather than hidden behind a bad score.
 
 ## Writing good checks
 
@@ -371,6 +381,7 @@ debias = true
 | `HUNCH_BACKEND_MODEL` | Quick single-model setup without a TOML file (exposed as `default`) |
 | `HUNCH_DEFAULT_MODEL` | Overrides `service.default_model` |
 | `HUNCH_CONCURRENCY` | Simultaneous backend calls. Keep it modest on a shared server |
+| `HUNCH_BACKEND_MODEL` + `mode` in `hunch.toml` | `one_token` (default), `deliberate` or `auto` — see [Deliberate mode](#deliberate-mode) |
 | `SSL_CERT_FILE` | CA bundle for a backend behind a private or self-signed CA, e.g. `/etc/ssl/certs/ca-certificates.crt` (Python doesn't use the system store by default) |
 | `HUNCH_API_KEYS` | Comma-separated bearer keys. Hunch **refuses** to listen beyond localhost without them (or `HUNCH_ALLOW_NOAUTH=1` behind an authenticating proxy) |
 

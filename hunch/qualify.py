@@ -23,7 +23,7 @@ import json
 import statistics
 import sys
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 
 import httpx
 
@@ -48,6 +48,8 @@ class Report:
     backend_model: str
     qualified: bool = False
     unavailable: bool = False   # backend down: no verdict either way
+    mode: str = "one_token"     # how the answer was read: one_token / deliberate
+    opens_scratchpad: bool | None = None   # the model's first token starts thinking, not answering
     reasons: list[str] = field(default_factory=list)
     accuracy: float | None = None
     accuracy_vague: float | None = None
@@ -110,25 +112,29 @@ async def _run(engine: Engine, spec, items: list[dict]) -> list[float | None]:
 
 
 async def qualify_model(engine: Engine, client: httpx.AsyncClient, name: str, served: set[str], headers: dict,
-                        criteria: Criteria, quick: bool = False, progress=print) -> Report:
+                        criteria: Criteria, quick: bool = False, progress=print,
+                        spec_override=None, label: str | None = None) -> Report:
     s = engine.s
-    spec = s.resolve(name)
+    spec = spec_override or s.resolve(name)
     if spec is None:
         return Report(model=name, backend_model="?", reasons=[f"model {name!r} is not configured"])
-    r = Report(model=name, backend_model=spec.backend_model)
+    r = Report(model=label or name, backend_model=spec.backend_model)
     t0 = time.perf_counter()
     if spec.backend_model not in served:
         r.reasons.append(f"backend does not serve {spec.backend_model!r}")
         return r
+    r.mode = await engine.mode_for(spec)
     problem = await probe_constraint(client, s, spec, headers)
     if problem:
         r.reasons.append(problem)
         r.unavailable = problem.startswith("constraint probe: HTTP 5") or "unreachable" in problem
         return r
 
+    if r.mode == "one_token":
+        r.opens_scratchpad = await engine.opens_scratchpad(spec)
     named, vague = build(), build(vague=True)
     labels = [it["label"] for it in named]
-    progress(f"   {name}: named look-alikes, run 1/{1 if quick else 2} ...")
+    progress(f"   {r.model}: mode={r.mode}, named look-alikes, run 1/{1 if quick else 2} ...")
     run1 = await _run(engine, spec, named)
     run2 = None
     if not quick:
@@ -156,7 +162,10 @@ async def qualify_model(engine: Engine, client: httpx.AsyncClient, name: str, se
 
 def print_report(r: Report, c: Criteria) -> None:
     status = "QUALIFIED" if r.qualified else ("UNAVAILABLE (backend down, no verdict)" if r.unavailable else "NOT QUALIFIED")
-    print(f"\n== {r.model} ({r.backend_model}): {status}")
+    print(f"\n== {r.model} ({r.backend_model}, mode={r.mode}): {status}")
+    if r.opens_scratchpad:
+        print("   NOTE: this model's first generated token opens a thinking block rather than answering, so it has")
+        print("         no non-thinking mode. One-token numbers below do not measure its ability; see mode=deliberate.")
     if r.accuracy is not None:
         fmt = lambda v, f: "-" if v is None else format(v, f)  # noqa: E731
         print(f"   accuracy @{GATE}: {r.accuracy:.1f}%   (min {c.min_accuracy:g}%)")
@@ -187,6 +196,16 @@ async def run(names: list[str], criteria: Criteria, quick: bool, json_path: str 
             report = await qualify_model(engine, client, name, served, headers, criteria, quick)
             print_report(report, criteria)
             reports.append(report)
+            # A model with no non-thinking mode can't be judged on its first token. Re-run it the way it
+            # can actually answer, and report both, so the trade-off is visible.
+            if report.opens_scratchpad and not report.qualified and not report.unavailable:
+                spec = s.resolve(name)
+                print(f"\n   re-running {name} in deliberate mode (it thinks first; ~{spec.think_budget} tokens per check) ...")
+                deliberate = await qualify_model(engine, client, name, served, headers, criteria, quick,
+                                                 spec_override=replace(spec, mode="deliberate"),
+                                                 label=f"{name} (deliberate)")
+                print_report(deliberate, criteria)
+                reports.append(deliberate)
     if json_path:
         with open(json_path, "w") as f:
             json.dump({"criteria": asdict(criteria), "reports": [asdict(r) for r in reports]}, f, indent=1)

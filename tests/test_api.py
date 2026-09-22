@@ -22,8 +22,10 @@ SETTINGS = Settings(
 )
 
 
-def fake_backend(prose=False, fail_first=0, status=504):
-    state = {"fails": fail_first, "calls": 0, "bodies": []}
+def fake_backend(prose=False, fail_first=0, status=504, scratchpad=False, think_tokens=0):
+    """scratchpad: the model's first unconstrained token opens a thinking block (no non-thinking mode).
+    think_tokens: in deliberate calls, emit this many thinking tokens before the verdict."""
+    state = {"fails": fail_first, "calls": 0, "bodies": [], "probes": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/models":
@@ -33,6 +35,11 @@ def fake_backend(prose=False, fail_first=0, status=504):
             state["fails"] -= 1
             return httpx.Response(status, text="try later", headers={"retry-after": "0"})
         body = json.loads(request.content)
+        if "structured_outputs" not in body:          # the unconstrained scratchpad probe
+            state["probes"] += 1
+            content = "<think>" if scratchpad else "yes"
+            return httpx.Response(200, json={"choices": [{"message": {"content": content}}],
+                                             "usage": {"prompt_tokens": 10, "completion_tokens": 1}})
         state["bodies"].append(body)
         labels = body["structured_outputs"]["choice"]
         user = body["messages"][-1]["content"]
@@ -54,9 +61,13 @@ def fake_backend(prose=False, fail_first=0, status=504):
         top += [{"token": lab, "logprob": math.log(0.2 / len(others))} for lab in others][:17]
         top += [{"token": "<eos>", "logprob": math.log(0.05)}, {"token": "The", "logprob": math.log(0.05)}]
         chosen = "The" if prose else pref
+        tokens = [{"token": "thinking", "logprob": 0.0, "top_logprobs": []} for _ in range(think_tokens)]
+        tokens.append({"token": chosen, "logprob": math.log(0.7), "top_logprobs": top})
+        if think_tokens:  # a trailing stop token, as real backends emit
+            tokens.append({"token": "<|endoftext|>", "logprob": 0.0, "top_logprobs": []})
         return httpx.Response(200, json={
-            "choices": [{"message": {"content": chosen}, "logprobs": {"content": [{"token": chosen, "logprob": math.log(0.7), "top_logprobs": top}]}}],
-            "usage": {"prompt_tokens": 100, "completion_tokens": 1}})
+            "choices": [{"message": {"content": chosen}, "logprobs": {"content": tokens}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 1 + think_tokens}})
 
     return httpx.MockTransport(handler), state
 
@@ -306,3 +317,77 @@ def test_package_version_matches_pyproject():
     pyproject = tomllib.loads((pathlib.Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
     assert pyproject["project"]["version"] == hunch.__version__
     assert pyproject["tool"]["setuptools"]["packages"] == ["hunch"]  # bench/ and deploy/ must not be packaged
+
+
+# ---------------------------------------------------------------- modes
+from hunch.engine import Engine  # noqa: E402
+
+
+def _engine(settings=SETTINGS, **kw):
+    transport, state = fake_backend(**kw)
+    return Engine(settings, httpx.AsyncClient(transport=transport)), state
+
+
+def test_detects_a_model_with_no_non_thinking_mode():
+    import asyncio
+
+    async def go(scratchpad):
+        engine, state = _engine(scratchpad=scratchpad)
+        async with engine.client:
+            return await engine.opens_scratchpad(SETTINGS.models["fast"]), state["probes"]
+
+    assert asyncio.run(go(True)) == (True, 1)
+    assert asyncio.run(go(False)) == (False, 1)
+
+
+def test_auto_mode_picks_deliberate_and_caches_the_probe():
+    import asyncio
+
+    async def go():
+        settings = replace(SETTINGS, models={"m": replace(SETTINGS.models["fast"], mode="auto")})
+        engine, state = _engine(settings, scratchpad=True, think_tokens=3)
+        async with engine.client:
+            first = await engine.mode_for(settings.models["m"])
+            second = await engine.mode_for(settings.models["m"])
+            results, _ = await engine.judge(settings.models["m"], "ctx", {"q": {"kind": "yesno", "question": "yes-please"}})
+        return first, second, state["probes"], state["bodies"][-1], results["q"]
+
+    first, second, probes, body, result = asyncio.run(go())
+    assert (first, second) == ("deliberate", "deliberate")
+    assert probes == 1                                   # probed once, then cached
+    assert body["max_tokens"] == SETTINGS.models["fast"].think_budget
+    assert "reasoning_effort" not in body                # "don't think" fields dropped in deliberate mode
+    assert result["p_yes"] == pytest.approx(0.7 / 0.9, abs=1e-3)   # verdict read past the thinking tokens
+
+
+def test_deliberate_mode_errors_when_no_verdict_is_reached():
+    import asyncio
+    from hunch.engine import HunchError
+
+    async def go():
+        spec = replace(SETTINGS.models["fast"], mode="deliberate")
+        engine, _ = _engine(replace(SETTINGS, models={"fast": spec}), prose=True, think_tokens=2)
+        async with engine.client:
+            try:
+                await engine.judge(spec, "ctx", {"q": {"kind": "yesno", "question": "x"}})
+            except HunchError as e:
+                return e.code, e.message
+        return None, None
+
+    code, message = asyncio.run(go())
+    assert code == "backend_error" and "think_budget" in message
+
+
+def test_one_token_mode_is_unchanged_and_sends_max_tokens_1():
+    import asyncio
+
+    async def go():
+        engine, state = _engine()
+        async with engine.client:
+            await engine.judge(SETTINGS.models["fast"], "ctx", {"q": {"kind": "yesno", "question": "yes-please"}})
+        return state["bodies"][-1], state["probes"]
+
+    body, probes = asyncio.run(go())
+    assert body["max_tokens"] == 1
+    assert body["reasoning_effort"] == "none"            # kept in one-token mode
+    assert probes == 0                                   # no probe unless mode="auto"

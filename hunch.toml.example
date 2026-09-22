@@ -16,6 +16,11 @@ group_size = 15                    # options per call for big picks
 [models.qwen]
 backend_model = "Qwen/Qwen3.5-397B-A17B"
 description = "Most accurate in the bundled benchmark"
+# mode = "one_token"   # default: the answer is the first generated token
+# mode = "deliberate"  # the model thinks first; only its final verdict token is constrained. For models
+#                      # with no non-thinking mode. Costs think_budget tokens and seconds per check.
+# mode = "auto"        # probe the backend once at first use and pick
+# think_budget = 512   # max thinking tokens in deliberate mode
 
 [models.gemma]
 backend_model = "google/gemma-4-31b-it"

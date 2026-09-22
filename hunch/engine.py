@@ -16,6 +16,9 @@ import httpx
 from . import prompts
 from .config import ModelSpec, Settings
 
+MODES = ("one_token", "deliberate", "auto")
+# Request fields that ask a model not to think. Removed in deliberate mode, where thinking is the point.
+THINKING_OFF_KEYS = ("reasoning_effort", "chat_template_kwargs")
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 DIGITS = "0123456789"
 MAX_LEVELS = len(DIGITS)
@@ -66,24 +69,34 @@ class Engine:
         self.s = settings
         self.client = client
         self.sem = asyncio.Semaphore(settings.max_concurrency)
+        self._detected: dict[str, str] = {}   # model name -> resolved mode, for mode="auto"
 
     @property
     def max_options(self) -> int:
         return self.s.group_size * min(self.s.max_top_logprobs, len(LETTERS))
 
     # ------------------------------------------------------------- backend call
-    async def label_probs(self, spec: ModelSpec, msgs: list[dict], labels: str) -> tuple[dict[str, float], Usage]:
-        body = {
+    def _request(self, spec: ModelSpec, msgs: list[dict], labels: str, deliberate: bool) -> dict:
+        extra = dict(spec.extra_body)
+        if deliberate:  # thinking is the point here, so drop any "don't think" fields
+            for key in THINKING_OFF_KEYS:
+                extra.pop(key, None)
+        return {
             "model": spec.backend_model,
             "messages": msgs,
             # Use structured_outputs: some vLLM versions silently ignore the legacy `guided_choice` param.
             "structured_outputs": {"choice": list(labels)},
             "logprobs": True,
             "top_logprobs": min(self.s.max_top_logprobs, max(len(labels), 2)),
-            "max_tokens": 1,
+            "max_tokens": spec.think_budget if deliberate else 1,
             "temperature": 0,
-            **spec.extra_body,
+            **extra,
         }
+
+    async def label_probs(self, spec: ModelSpec, msgs: list[dict], labels: str,
+                          mode: str | None = None) -> tuple[dict[str, float], Usage]:
+        deliberate = (mode or await self.mode_for(spec)) == "deliberate"
+        body = self._request(spec, msgs, labels, deliberate)
         headers = {"Authorization": f"Bearer {self.s.backend_api_key}"} if self.s.backend_api_key else {}
         last = "no attempt"
         for attempt in range(self.s.retries + 1):
@@ -109,14 +122,55 @@ class Engine:
                 if any(k in text.lower() for k in ("context length", "maximum context", "too long")):
                     raise HunchError(413, "context_too_long", "context plus question exceed the backend model's context window")
                 raise HunchError(502, "backend_error", f"backend HTTP {r.status_code}: {text}")
-            return self._parse(r.json(), labels)
+            return self._parse(r.json(), labels, deliberate)
         raise HunchError(503, "backend_unavailable", last)
 
-    @staticmethod
-    def _parse(data: dict, labels: str) -> tuple[dict[str, float], Usage]:
+    async def mode_for(self, spec: ModelSpec) -> str:
+        """The resolved mode. With mode="auto", probe the backend once and cache the answer."""
+        if spec.mode != "auto":
+            if spec.mode not in MODES:
+                raise HunchError(400, "invalid_request", f"model {spec.name!r}: mode must be one of {MODES}")
+            return spec.mode
+        if spec.name not in self._detected:
+            self._detected[spec.name] = "deliberate" if await self.opens_scratchpad(spec) else "one_token"
+        return self._detected[spec.name]
+
+    async def opens_scratchpad(self, spec: ModelSpec) -> bool:
+        """True when the model's FIRST generated token opens a thinking block rather than answering.
+
+        Such models (GLM-5.3, for one) have no non-thinking mode: their chat template always starts a
+        scratchpad, so constraining the first token to a label reads a distribution that is not about the
+        answer. One unconstrained max_tokens=1 call is enough to see it.
+        """
+        body = {"model": spec.backend_model,
+                "messages": [{"role": "user", "content": "Reply with exactly one word: yes"}],
+                "max_tokens": 1, "temperature": 0, **spec.extra_body}
+        headers = {"Authorization": f"Bearer {self.s.backend_api_key}"} if self.s.backend_api_key else {}
         try:
-            tok = data["choices"][0]["logprobs"]["content"][0]
-        except (KeyError, IndexError, TypeError):
+            async with self.sem:
+                r = await self.client.post(f"{self.s.backend_url}/v1/chat/completions", json=body,
+                                           headers=headers, timeout=self.s.timeout_s)
+            if r.status_code != 200:
+                return False
+            msg = r.json()["choices"][0].get("message") or {}
+        except (httpx.TimeoutException, httpx.TransportError):
+            return False
+        if (msg.get("reasoning_content") or msg.get("reasoning") or "").strip():
+            return True
+        content = (msg.get("content") or "").strip().lower()
+        return "think" in content or content.startswith("<")
+
+    @staticmethod
+    def _parse(data: dict, labels: str, deliberate: bool = False) -> tuple[dict[str, float], Usage]:
+        try:
+            toks = data["choices"][0]["logprobs"]["content"]
+            # one_token: the answer IS the first token. deliberate: the model thinks first, so the
+            # verdict is the last token that is one of the labels.
+            tok = next((t for t in reversed(toks) if str(t.get("token", "")).strip() in labels)) if deliberate else toks[0]
+        except (KeyError, IndexError, TypeError, StopIteration):
+            if deliberate:
+                raise HunchError(502, "backend_error",
+                                 "no constrained verdict token within think_budget; raise it or use mode=one_token")
             raise HunchError(502, "backend_error", "backend returned no logprobs")
         chosen = str(tok.get("token", "")).strip()
         if chosen not in labels:
