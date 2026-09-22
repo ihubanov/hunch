@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import pathlib
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 try:
     import tomllib  # Python 3.11+
@@ -33,6 +33,10 @@ class ModelSpec:
     # "auto"       - probe the backend once and pick
     mode: str = "one_token"
     think_budget: int = 512   # max tokens the model may think for in deliberate mode
+    # How long the model may think in deliberate mode, if the backend supports it ("low" / "high" /
+    # "max" on GLM-style models). Sent as reasoning_effort. More thinking buys stability: on our
+    # benchmark GLM went 94.2% / 4.6% flips at "low" to 97.5% / 0.8% flips at the default.
+    effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +63,9 @@ def load_settings(path: str | os.PathLike | None = None) -> Settings:
         raw = tomllib.loads(pathlib.Path(path).read_text())
 
     models = {name: ModelSpec(name=name, **spec) for name, spec in raw.get("models", {}).items()}
+    # `effort` is sugar for extra_body.reasoning_effort, so one place decides what is sent
+    models = {n: (replace(m, extra_body={**m.extra_body, "reasoning_effort": m.effort}) if m.effort else m)
+              for n, m in models.items()}
     if not models and os.environ.get("HUNCH_BACKEND_MODEL"):
         models = {"default": ModelSpec(name="default", backend_model=os.environ["HUNCH_BACKEND_MODEL"],
                                        debias=os.environ.get("HUNCH_DEBIAS", "0") == "1")}

@@ -127,7 +127,7 @@ async def qualify_model(engine: Engine, client: httpx.AsyncClient, name: str, se
         r.reasons.append(f"backend does not serve {spec.backend_model!r}")
         return r
     r.mode = await engine.mode_for(spec)
-    problem = await probe_constraint(client, s, spec, headers)
+    problem = await probe_constraint(client, s, spec, headers, deliberate=(r.mode == "deliberate"))
     if problem:
         r.reasons.append(problem)
         r.unavailable = problem.startswith("constraint probe: HTTP 5") or "unreachable" in problem

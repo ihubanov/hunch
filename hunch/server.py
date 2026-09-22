@@ -13,7 +13,9 @@ from pydantic import BaseModel, ConfigDict
 
 from . import __version__
 from .config import Settings, load_settings
-from .engine import Engine, HunchError, validate_checks
+from dataclasses import replace
+
+from .engine import THINKING_OFF_EFFORTS, Engine, HunchError, validate_checks
 
 
 class JudgeRequest(BaseModel):
@@ -21,6 +23,9 @@ class JudgeRequest(BaseModel):
     context: str | dict[str, Any] | list[Any]
     checks: dict[str, Any]
     model: str | None = None
+    # Per-request thinking effort for deliberate-mode models ("low" / "high" / "max"): trade cost for
+    # stability on this call only. Ignored by backends that don't support it.
+    effort: str | None = None
 
 
 def _error(status: int, code: str, message: str) -> JSONResponse:
@@ -59,6 +64,11 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
         spec = settings.resolve(req.model)
         if spec is None:
             raise HunchError(400, "unknown_model", f"unknown model {req.model!r}; configured: {sorted(settings.models)}")
+        if req.effort is not None:
+            if req.effort.lower() in THINKING_OFF_EFFORTS:
+                raise HunchError(400, "invalid_request",
+                                 f"effort {req.effort!r} would switch thinking off; use mode=one_token instead")
+            spec = replace(spec, extra_body={**spec.extra_body, "reasoning_effort": req.effort})
         checks = validate_checks(req.checks, engine.max_options)
         t0 = time.perf_counter()
         results, usage = await engine.judge(spec, req.context, checks)

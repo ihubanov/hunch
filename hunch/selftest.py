@@ -17,7 +17,7 @@ import time
 import httpx
 
 from .config import load_settings
-from .engine import Engine, HunchError
+from .engine import Engine, HunchError, effective_extra_body
 
 _REPLACE = {"kind": "yesno", "question": "Does `new` replace `old`'s value for the same thing?",
             "yes_if": "same thing, changed value", "no_if": "same value restated, or a different thing"}
@@ -44,11 +44,16 @@ CASES = [  # (context, check, expected): bool for yesno (p >= 0.5), key for pick
 ]
 
 
-async def probe_constraint(client: httpx.AsyncClient, s, spec, headers: dict) -> str | None:
-    """None if the backend enforces structured_outputs and returns logprobs for this model, else the problem."""
+async def probe_constraint(client: httpx.AsyncClient, s, spec, headers: dict, deliberate: bool = False) -> str | None:
+    """None if the backend enforces structured_outputs and returns logprobs for this model, else the problem.
+
+    In deliberate mode the model thinks first, so the probe must allow it the same budget: with
+    max_tokens=2 a thinking model spends both tokens thinking and looks unconstrained.
+    """
     body = {"model": spec.backend_model, "messages": [{"role": "user", "content": "Write the word hello and nothing else."}],
             "structured_outputs": {"choice": ["A", "B"]}, "logprobs": True, "top_logprobs": 2,
-            "max_tokens": 2, "temperature": 0, **spec.extra_body}
+            "max_tokens": spec.think_budget if deliberate else 2, "temperature": 0,
+            **effective_extra_body(spec, deliberate)}
     r = None
     for attempt in range(s.retries + 1):  # transient 429 / 5xx / timeouts are retried like normal checks
         if attempt:
@@ -115,7 +120,7 @@ async def run(names: list[str]) -> int:
                 failures += 1
                 continue
             print("ok   model is served")
-            problem = await probe_constraint(client, s, spec, headers)
+            problem = await probe_constraint(client, s, spec, headers, deliberate=(spec.mode == "deliberate"))
             if problem:
                 print(f"FAIL {problem}")
                 failures += 1

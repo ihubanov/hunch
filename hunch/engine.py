@@ -18,11 +18,31 @@ from .config import ModelSpec, Settings
 
 MODES = ("one_token", "deliberate", "auto")
 PROBE_MAX_TOKENS = 16   # enough to tell an answer from the start of a scratchpad
-# Request fields that ask a model not to think. Removed in deliberate mode, where thinking is the point.
-THINKING_OFF_KEYS = ("reasoning_effort", "chat_template_kwargs")
+# Values of `reasoning_effort` that mean "don't think". Dropped in deliberate mode; real effort levels
+# (low / high / max) are passed through, and "low" is often the best setting there — it can cut the
+# thinking to a few tokens without losing accuracy.
+THINKING_OFF_EFFORTS = ("none", "off", "disable", "disabled")
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 DIGITS = "0123456789"
 MAX_LEVELS = len(DIGITS)
+
+
+def effective_extra_body(spec: ModelSpec, deliberate: bool) -> dict:
+    """spec.extra_body as sent. In deliberate mode the fields that switch thinking OFF are dropped;
+    real effort levels (low / high / max) are kept, since they control how long the model thinks."""
+    extra = dict(spec.extra_body)
+    if not deliberate:
+        return extra
+    if str(extra.get("reasoning_effort", "")).lower() in THINKING_OFF_EFFORTS:
+        extra.pop("reasoning_effort")
+    kwargs = extra.get("chat_template_kwargs")
+    if isinstance(kwargs, dict) and kwargs.get("enable_thinking") is False:
+        kwargs = {k: v for k, v in kwargs.items() if k != "enable_thinking"}
+        if kwargs:
+            extra["chat_template_kwargs"] = kwargs
+        else:
+            extra.pop("chat_template_kwargs")
+    return extra
 
 
 class HunchError(Exception):
@@ -78,10 +98,7 @@ class Engine:
 
     # ------------------------------------------------------------- backend call
     def _request(self, spec: ModelSpec, msgs: list[dict], labels: str, deliberate: bool) -> dict:
-        extra = dict(spec.extra_body)
-        if deliberate:  # thinking is the point here, so drop any "don't think" fields
-            for key in THINKING_OFF_KEYS:
-                extra.pop(key, None)
+        extra = effective_extra_body(spec, deliberate)
         return {
             "model": spec.backend_model,
             "messages": msgs,

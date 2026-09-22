@@ -453,3 +453,83 @@ def test_qualify_records_metrics_for_the_vague_run_too():
     r = asyncio.run(go())
     assert r.accuracy_vague is not None
     assert r.auroc_vague is not None and r.brier_vague is not None and r.ece_vague is not None
+
+
+@pytest.mark.parametrize("extra,expected", [
+    ({"reasoning_effort": "none"}, {}),                                   # "off" value dropped
+    ({"reasoning_effort": "low"}, {"reasoning_effort": "low"}),           # a real effort level survives
+    ({"reasoning_effort": "max"}, {"reasoning_effort": "max"}),
+    ({"chat_template_kwargs": {"enable_thinking": False}}, {}),           # the off switch dropped
+    ({"chat_template_kwargs": {"enable_thinking": False, "keep": 1}}, {"chat_template_kwargs": {"keep": 1}}),
+    ({"top_k": 5}, {"top_k": 5}),                                         # unrelated fields untouched
+])
+def test_deliberate_mode_keeps_real_effort_levels(extra, expected):
+    import asyncio
+    spec = replace(SETTINGS.models["fast"], mode="deliberate", extra_body=extra)
+
+    async def go():
+        transport, state = fake_backend(think_tokens=2)
+        async with httpx.AsyncClient(transport=transport) as client:
+            await Engine(replace(SETTINGS, models={"fast": spec}), client).judge(
+                spec, "ctx", {"q": {"kind": "yesno", "question": "yes-please"}})
+        return state["bodies"][-1]
+
+    body = asyncio.run(go())
+    sent = {k: v for k, v in body.items() if k in ("reasoning_effort", "chat_template_kwargs", "top_k")}
+    assert sent == expected
+
+
+def test_constraint_probe_gives_a_thinking_model_room():
+    """With max_tokens=2 a deliberate model spends both tokens thinking and looks unconstrained."""
+    import asyncio
+    from hunch.selftest import probe_constraint
+    seen = {}
+
+    def handler(request):
+        body = json.loads(request.content)
+        seen["max_tokens"] = body["max_tokens"]
+        seen["extra"] = {k: v for k, v in body.items() if k == "reasoning_effort"}
+        content = "A" if body["max_tokens"] > 2 else ""       # thinking eats a 2-token budget
+        return httpx.Response(200, json={"choices": [{"message": {"content": content},
+                                                      "logprobs": {"content": [{"token": content or "x", "logprob": 0.0}]}}]})
+
+    async def go(spec, deliberate):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await probe_constraint(client, SETTINGS, spec, {}, deliberate=deliberate)
+
+    spec = replace(SETTINGS.models["fast"], mode="deliberate", extra_body={"reasoning_effort": "high"})
+    assert asyncio.run(go(spec, True)) is None                # passes, with room to think
+    assert seen["max_tokens"] == spec.think_budget
+    assert seen["extra"] == {"reasoning_effort": "high"}      # a real effort level reaches the probe too
+    assert "NOT enforced" in (asyncio.run(go(spec, False)) or "")   # the old behaviour would fail it
+
+
+def test_effort_is_configurable_per_model_and_per_request():
+    import asyncio
+    import tomllib  # noqa: F401  (config path is exercised via ModelSpec directly)
+
+    # per model: `effort` is sugar for extra_body.reasoning_effort
+    from hunch.config import ModelSpec, load_settings
+    import os
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+        f.write('[backend]\nurl = "http://b"\n[models.m]\nbackend_model = "x"\nmode = "deliberate"\neffort = "high"\n')
+        path = f.name
+    try:
+        spec = load_settings(path).models["m"]
+        assert spec.extra_body["reasoning_effort"] == "high"
+    finally:
+        os.unlink(path)
+
+    # per request: `effort` overrides it for that call only
+    transport, state = fake_backend(think_tokens=2)
+    settings = replace(SETTINGS, models={"fast": replace(SETTINGS.models["fast"], mode="deliberate",
+                                                         extra_body={"reasoning_effort": "max"})})
+    with TestClient(create_app(settings, transport=transport)) as c:
+        r = c.post("/v1/judge", json={"context": "x", "checks": {"q": {"kind": "yesno", "question": "yes-please"}},
+                                      "effort": "low"})
+        assert r.status_code == 200, r.text
+        assert state["bodies"][-1]["reasoning_effort"] == "low"
+        bad = c.post("/v1/judge", json={"context": "x", "checks": {"q": {"kind": "yesno", "question": "x"}},
+                                        "effort": "none"})
+    assert bad.status_code == 400 and "switch thinking off" in bad.json()["error"]["message"]
