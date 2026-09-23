@@ -43,13 +43,46 @@ def context_of(it: dict, semantic: bool) -> dict:
     return {SEMANTIC_KEYS.get(k, k): v for k, v in ctx.items()} if semantic and isinstance(ctx, dict) else ctx
 
 
-def run(agent, items: list[dict], vague: bool, semantic: bool = False) -> tuple[list[float | None], float]:
+def choice_defs(check: dict, vague: bool) -> list[tuple[dict, str]]:
+    """The same yes/no question as a two-option choice with neutral keys, in both orders.
+
+    laya#156: `noul` hardcodes its option labels to `false:` / `true:`, and on the shipped checkpoints
+    those label WORDS can decide the answer regardless of the state. Neutral A/B keys avoid that; running
+    both orders and averaging also cancels any preference for the first-listed option.
+    """
+    yes_text = check.get("yes_if") or "the statement is true of the data"
+    no_text = check.get("no_if") or "the statement is not true of the data"
+    if vague:  # no definitions: the options only say yes / no
+        yes_text, no_text = "yes", "no"
+    q = check["question"]
+    return [({"type": "choice", "instructions": q, "criteria": {"A": yes_text, "B": no_text}}, "A"),
+            ({"type": "choice", "instructions": q, "criteria": {"A": no_text, "B": yes_text}}, "B")]
+
+
+def _p_yes(answer, yes_key: str) -> float:
+    if isinstance(answer, dict) and "noul" in answer:
+        return float(answer["noul"])
+    probs = answer.get("probabilities") or answer.get("probs") or {}
+    if probs:
+        total = sum(float(v) for v in probs.values()) or 1.0
+        return float(probs.get(yes_key, 0.0)) / total
+    return 1.0 if answer.get("choice") == yes_key else 0.0
+
+
+def run(agent, items: list[dict], vague: bool, semantic: bool = False,
+        as_choice: bool = False) -> tuple[list[float | None], float]:
     out, t0 = [], time.perf_counter()
     for it in items:
         try:
-            result = agent.predict(context_of(it, semantic), {"q": question_def(it["check"], vague)})
-            answer = result["answers"]["q"]
-            out.append(float(answer["noul"] if isinstance(answer, dict) and "noul" in answer else answer))
+            context = context_of(it, semantic)
+            if as_choice:
+                ps = []
+                for qdef, yes_key in choice_defs(it["check"], vague):
+                    ps.append(_p_yes(agent.predict(context, {"q": qdef})["answers"]["q"], yes_key))
+                out.append(sum(ps) / len(ps))
+            else:
+                answer = agent.predict(context, {"q": question_def(it["check"], vague)})["answers"]["q"]
+                out.append(_p_yes(answer, "A"))
         except Exception as e:  # noqa: BLE001
             print(f"  error on {it['id']}: {e!r}")
             out.append(None)
@@ -62,6 +95,11 @@ def main() -> int:
     ap.add_argument("--device", default=None, help="cuda / cpu / mps (default: the library's choice)")
     ap.add_argument("--runs", type=int, default=2, help="repeats of the named variant, for the stability check")
     ap.add_argument("--json", dest="json_path")
+    ap.add_argument("--as-choice", action="store_true",
+                    help="ask each pair as a two-option `choice` with neutral keys A/B instead of `noul`, "
+                         "per NandhaKishorM/laya#156: noul hardcodes true:/false: option labels, and those "
+                         "label words can decide the answer. Runs both key orders and averages, so a "
+                         "position preference cancels out.")
     ap.add_argument("--semantic-keys", action="store_true",
                     help="rename the context keys old/new -> old_assertion/new_assertion and a/b -> "
                          "assertion_a/assertion_b, as recommended in NandhaKishorM/laya#135")
@@ -76,19 +114,20 @@ def main() -> int:
     items = build()
     labels = [it["label"] for it in items]
     print(f"{a.model} loaded in {load_s:.1f}s; {len(items)} labelled pairs"
-          f"{'; semantic context keys' if a.semantic_keys else ''}")
+          f"{'; semantic context keys' if a.semantic_keys else ''}"
+          f"{'; asked as a two-option choice, both orders' if a.as_choice else ''}")
 
     runs, per_item_ms = [], None
     for i in range(a.runs):
-        ps, ms = run(agent, items, vague=False, semantic=a.semantic_keys)
+        ps, ms = run(agent, items, vague=False, semantic=a.semantic_keys, as_choice=a.as_choice)
         runs.append(ps)
         per_item_ms = ms if per_item_ms is None else per_item_ms
         print(f"  named run {i + 1}/{a.runs}: {ms:.0f} ms per question")
-    vague_ps, vague_ms = run(agent, items, vague=True, semantic=a.semantic_keys)
+    vague_ps, vague_ms = run(agent, items, vague=True, semantic=a.semantic_keys, as_choice=a.as_choice)
     print(f"  vague run: {vague_ms:.0f} ms per question")
 
     scored = [(p, y) for p, y in zip(runs[0], labels) if p is not None]
-    r = Report(model=f"laya:{a.model}", backend_model=a.model)
+    r = Report(model=f"laya:{a.model}{' (as choice)' if a.as_choice else ''}", backend_model=a.model)
     r.accuracy = round(accuracy_at_gate(runs[0], labels), 1)
     r.accuracy_vague = round(accuracy_at_gate(vague_ps, labels), 1)
     scored_vague = [(p, y) for p, y in zip(vague_ps, labels) if p is not None]
