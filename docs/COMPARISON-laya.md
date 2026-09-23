@@ -34,38 +34,53 @@ python bench/laya_compare.py --model convaiinnovations/laya-typed-decisions --de
 
 ## Results
 
-Laya 0.3.5 on a single edge-class GPU, deterministic (0 flips between runs, 0 errors). Hunch's criteria:
-accuracy at the `p_yes ≥ 0.9` gate ≥ 90%, ECE ≤ 0.15, definitions must not make it worse, ≤ 2% flips.
-The same runs on CPU gave the same verdicts and the same numbers to within 0.4 points, so the device
-changes nothing material.
+Laya 0.3.5, deterministic (0 flips between runs, 0 errors). Hunch's criteria: accuracy at the
+`p_yes ≥ 0.9` gate ≥ 90%, ECE ≤ 0.15, definitions must not make it worse, ≤ 2% flips. GPU and CPU runs
+agreed to within 0.4 points, so the device changes nothing material.
 
-| Checkpoint | Verdict | Accuracy (named) | Accuracy (vague) | AUROC | Brier | ECE |
-| --- | --- | --- | --- | --- | --- | --- |
-| `laya-typed-decisions` (421M) | ❌ Not qualified | **68.8** | 66.7 | 0.759 | 0.224 | **0.207** |
-| `laya` (421M, English) | ❌ Not qualified | 72.1 | 72.5 | 0.757 | 0.315 | 0.332 |
-| `laya-multilingual` (322M) | ❌ Not qualified | 63.3 | 63.8 | 0.696 | 0.371 | 0.375 |
-| *For reference*, Hunch on Qwen3.8-27B | ✅ Qualified | 99.6 | 80.0 | 1.000 | 0.030 | 0.058 |
-| *For reference*, Hunch on Qwen3.5-9B | ❌ Not qualified | 90.8 | 81.7 | 0.996 | 0.192 | 0.266 |
+**How the question is asked matters more than anything else here.** Laya's `noul` primitive hardcodes its
+option labels to `false:` / `true:`, and [laya#156](https://github.com/NandhaKishorM/laya/issues/156)
+reports that on the shipped checkpoints those label *words* can decide the answer regardless of the
+state. Our first published numbers were all `noul`. The maintainer suggested the control: ask the same
+pairs as a two-option `choice` with neutral `A` / `B` keys and the same definitions as the option
+descriptions. We ran it in both key orders and averaged (`--as-choice`), so a preference for the
+first-listed option cancels:
 
-Qwen3.5-9B is in that table because it *also* fails, on calibration. The ladder on this benchmark runs
-68.8% (Laya's best) → 90.8% (a 9B LLM, still short) → 99.6% (a 27B LLM, qualified).
+| Checkpoint | Asked as | Verdict | Accuracy (named) | Accuracy (vague) | AUROC | Brier | ECE |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `laya` (421M, English) | **neutral choice** | ❌ Not qualified | **81.2** | 66.7 | **0.953** | 0.215 | 0.301 |
+| `laya-typed-decisions` (421M) | **neutral choice** | ❌ Not qualified | **73.8** | 69.2 | **0.904** | 0.189 | 0.236 |
+| `laya` (421M, English) | `noul` | ❌ Not qualified | 72.1 | 72.5 | 0.757 | 0.315 | 0.332 |
+| `laya-typed-decisions` (421M) | `noul` | ❌ Not qualified | 68.8 | 66.7 | 0.759 | 0.224 | 0.207 |
+| `laya-multilingual` (322M) | `noul` | ❌ Not qualified | 63.3 | 63.8 | 0.696 | 0.371 | 0.375 |
+| *For reference*, Hunch on Qwen3.8-27B | one token | ✅ Qualified | 99.6 | 80.0 | 1.000 | 0.030 | 0.058 |
+| *For reference*, Hunch on Qwen3.5-9B | one token | ❌ Not qualified | 90.8 | 81.7 | 0.996 | 0.192 | 0.266 |
 
-**Purpose-training beats raw generality at small size**, which is the clearest point in Laya's favour
-here. The smallest general LLM we have measured, Qwen3-0.6B, scored 35.8% on these same 240 pairs
-against `laya-typed-decisions`'s 68.8%, and 66.7% on the bare question — exactly the score you get by
-answering "no" to everything. That measurement predates this harness, though: it has no ECE, AUROC,
-Brier or stability figures and no concurrency-1 latency, so it is quoted here as context rather than
-given a row in the table above.
+**We got this wrong the first time, and the correction is large.** An earlier version of this document
+said Laya sat "barely above a constant-no baseline" with "only weak signal" (AUROC 0.759). With neutral
+labels the English checkpoint reaches **AUROC 0.953** and the purpose-built one 0.904. That is a model
+that ranks these look-alikes well. Asking through `noul` was suppressing its discrimination, not merely
+shaving points off it. Thanks to the Laya maintainer for pointing at the right control rather than
+arguing with the numbers.
 
-**Checkpoint choice matters, and the purpose-built one is the best of the three.**
-`laya-typed-decisions` has by far the best calibration of the three (ECE 0.207 against 0.332 and
-0.377) and is the only one where naming the look-alikes *helped* (66.7% → 68.8%) rather than hurt. So
-the "definitions make it worse" signature seen on the other two is a property of those checkpoints,
-not of Laya. It still misses the accuracy gate by 21 points and the calibration bar by 0.057.
+**What survives the correction: good ranker, unusable probabilities.** Neither checkpoint qualifies,
+but the reason has changed. Accuracy at the 0.9 gate is 73.8% / 81.2% against a 90% bar, and ECE is
+0.236 / 0.301 against 0.15 — **calibration did not improve at all**, and on `laya-typed-decisions` it
+got slightly worse. So the ordering these models produce is informative; the numbers attached to it are
+not something you can threshold at 0.9 without calibrating them yourself first.
 
-What no checkpoint manages is **separating the traps**: the best AUROC is 0.759, against 0.996 for the
-smallest LLM in the table above (Qwen3.5-9B) and 1.000 for Qwen3.8-27B. That is not a threshold
-problem — no gate placement rescues a ranking that weak.
+**Definitions help, once the question is asked in a way the model can answer.** For the English
+checkpoint, naming the look-alikes is worth 14.5 points as a neutral choice (66.7% → 81.2%), where under
+`noul` it *hurt*. An earlier version of this document said "better-written checks won't fix this model"
+about that checkpoint; through a neutral-label choice, better-written checks help it a lot.
+
+**Purpose-training still beats raw generality at small size.** The smallest general LLM we have measured,
+Qwen3-0.6B, scored 35.8% on these same pairs. That measurement predates this harness (no ECE, AUROC,
+Brier, stability or concurrency-1 latency), so it is context rather than a row in the table.
+
+One limit on the claim: switching to neutral labels in both orders moves accuracy and ranking by this
+much on our set. We did not verify that laya#156's label bug is the *mechanism*, only that the control it
+implies changes the result.
 
 ## Speed, measured on the same GPU
 
@@ -81,8 +96,10 @@ nothing else using the GPU, first call discarded:
 | Hunch on Qwen3.5-9B | 141 ms | 90.8% | 0.996 | 9B LLM, one constrained decode step, vLLM over HTTP |
 
 So on identical hardware the purpose-built model is about **2.3× faster** than a 9B LLM, not the order
-of magnitude its 33 ms T4 figure might suggest next to a server-side number — and it is 22 accuracy
-points short, with far weaker ranking. Read those timings with care:
+of magnitude its 33 ms T4 figure might suggest next to a server-side number. Two caveats on that
+comparison now: those timings were measured through `noul`, and the neutral-choice framing that the
+accuracy figures above use **doubles the calls** (both key orders), so the like-for-like speed advantage
+is roughly halved unless you ask in one order only. Read the timings with care:
 
 - **Different stacks.** Laya is an in-process PyTorch loop; Hunch's figure includes a vLLM server, HTTP
   and a prefix-cache hit. Neither is tuned for the other's shape.
@@ -152,14 +169,20 @@ with no errors, and the flag is in the repo so either variant can be reproduced.
 
 ## What we conclude
 
-Per checkpoint, on these pairs: all three fall short, and the purpose-built `laya-typed-decisions` is
-the closest. For **this** workload — subtle same-or-different judgments, where the whole point is a
-probability you can threshold — borrowing a modern general LLM still wins by a wide margin, and the
-cost is latency and a GPU you were already running.
+Per checkpoint, on these pairs, asked the way each model can actually answer: none qualifies, and the
+reason is calibration rather than blindness. Asked as a neutral two-option choice, `laya` ranks these
+look-alikes at AUROC 0.953 — comparable to a 9B LLM — in a 421M model that runs about 2.3× faster per
+call. What it cannot do is hand you a probability you can put behind a 0.9 gate without calibrating it
+yourself: ECE 0.236-0.301 against our 0.15 bar, and accuracy at that gate of 73.8-81.2% against 90%.
 
-A small purpose-trained model that passed `qualify` would be strictly better than what Hunch does
-today: far cheaper, far faster, runnable on a laptop or a single small board. We would happily add a
-backend for one. On this benchmark, these checkpoints are not it.
+For **this** workload — subtle same-or-different judgments where the whole point is a thresholdable
+probability — borrowing a modern general LLM still wins, and the cost is latency and a GPU you were
+already running. But the margin is much smaller than our first numbers suggested, and a calibration
+layer on top of Laya's ordering might close it. A small purpose-trained model that passed `qualify`
+would be strictly better than what Hunch does today: far cheaper, far faster, runnable on a laptop or a
+single small board. We would happily add a backend for one.
 
 If we have measured Laya unfairly, we would rather fix it than leave it standing: the script and the
-data are in this repo, and corrections are welcome as issues or pull requests.
+data are in this repo, and corrections are welcome as issues or pull requests. That is not a slogan —
+this document has already been corrected twice that way, once for a bug of our own (prose instead of
+native `criteria`) and once for the `noul` label bias, which the maintainer pointed us at.
