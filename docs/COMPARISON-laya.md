@@ -89,8 +89,37 @@ default text ([#249](https://github.com/NandhaKishorM/laya/pull/249)). Our runs 
 ([#163](https://github.com/NandhaKishorM/laya/pull/163)) replaces the `true:` / `false:` option words while still
 returning P(true), which makes a neutral-word `noul` possible in a single call. The checkpoint bias itself
 is unchanged: the maintainer says it needs a retrained checkpoint. The numbers above are 0.3.5 and
-stand. A re-run on 0.3.20 with neutral `labels` (`bench/laya_compare.py --noul-labels`) is in progress
-and will be added here.
+stand. The re-run on 0.3.20 below confirms them.
+
+### Re-run on laya 0.3.20: neutral option words in one call
+
+Same 240 pairs, same GPU, 0 errors and 0 flips in every run. `labels once` asks `noul` with the option words
+`A` / `B` in a single call; `labels both` also asks with the words swapped and averages
+(`bench/laya_compare.py --noul-labels once|both`):
+
+| Checkpoint | Asked as | Accuracy (named) | Accuracy (vague) | AUROC | Brier | ECE | Per question |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `laya` (English) | **`noul`, neutral labels, one call** | **81.2** | 67.5 | 0.939 | 0.205 | 0.295 | **61 ms** |
+| `laya` (English) | `noul`, neutral labels, both orders | 80.0 | 67.5 | 0.946 | 0.194 | 0.275 | 119 ms |
+| `laya` (English) | neutral choice, both orders | 80.8 | 67.1 | 0.952 | 0.214 | 0.299 | 120 ms |
+| `laya` (English) | `noul`, `true` / `false` | 72.1 | 72.5 | 0.757 | 0.314 | 0.331 | 63 ms |
+| `laya-typed-decisions` | `noul`, neutral labels, one call | 67.1 | 66.7 | 0.879 | 0.192 | 0.236 | 59 ms |
+| `laya-typed-decisions` | **neutral choice, both orders** | **73.3** | 68.8 | **0.905** | 0.189 | 0.236 | 127 ms |
+
+What it shows:
+
+- **The upgrade changed nothing by itself.** Plain `noul` gives 72.1% / AUROC 0.757 on 0.3.5 and on 0.3.20, on
+  CPU and on GPU (a CPU run on 0.3.20 matched to three decimals). The whole difference is the label words.
+- **On the English checkpoint one call is enough, and it costs nothing.** Neutral labels in a single call run at
+  the same speed as plain `noul` (61 vs 63 ms) and give the same accuracy as the two-call framings. Asking twice
+  adds 0.007-0.013 AUROC for twice the time. The earlier caveat that the fix halves Laya's speed advantage no
+  longer applies to this checkpoint.
+- **On `laya-typed-decisions` the reverse holds.** A single call with neutral labels scores 67.1%, below its own
+  plain `noul` (68.8%); the two-order choice scores 73.3%. So the right framing depends on the checkpoint, and it
+  is worth measuring on your own data before picking one.
+- **Calibration does not move.** ECE is 0.236-0.332 in all seven runs, against our 0.15 bar, and nothing
+  qualifies. With AUROC up to 0.952 and ECE stuck near 0.3, the two properties separate cleanly: the ordering
+  is good, and the probabilities need calibrating before they can sit behind a threshold.
 
 ## Speed, measured on the same GPU
 
@@ -106,10 +135,10 @@ nothing else using the GPU, first call discarded:
 | Hunch on Qwen3.5-9B | 141 ms | 90.8% | 0.996 | 9B LLM, one constrained decode step, vLLM over HTTP |
 
 So on identical hardware the purpose-built model is about **2.3× faster** than a 9B LLM, not the order
-of magnitude its 33 ms T4 figure might suggest next to a server-side number. Two caveats on that
-comparison now: those timings were measured through `noul`, and the neutral-choice framing that the
-accuracy figures above use **doubles the calls** (both key orders), so the like-for-like speed advantage
-is roughly halved unless you ask in one order only. Read the timings with care:
+of magnitude its 33 ms T4 figure might suggest next to a server-side number. That holds for the corrected
+framing too: on laya 0.3.20 the English checkpoint gets its neutral-label accuracy in one call at 61 ms
+(see the re-run above). The two-order framings, which `laya-typed-decisions` needs, cost about twice that.
+Read the timings with care:
 
 - **Different stacks.** Laya is an in-process PyTorch loop; Hunch's figure includes a vLLM server, HTTP
   and a prefix-cache hit. Neither is tuned for the other's shape.
