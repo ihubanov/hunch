@@ -82,6 +82,16 @@ One limit on the claim: switching to neutral labels in both orders moves accurac
 much on our set. We did not verify that laya#156's label bug is the *mechanism*, only that the control it
 implies changes the result.
 
+**Upstream since these runs (laya 0.3.7 → 0.3.20, 23–24 September).** The API half of laya#156 is fixed:
+`noul` now rejects criteria keys other than `true` / `false` instead of silently replacing them with
+default text ([#249](https://github.com/NandhaKishorM/laya/pull/249)). Our runs always used
+`true` / `false`, so they were not affected. A new opt-in `labels` field
+([#163](https://github.com/NandhaKishorM/laya/pull/163)) replaces the `true:` / `false:` option words while still
+returning P(true), which makes a neutral-word `noul` possible in a single call. The checkpoint bias itself
+is unchanged: the maintainer says it needs a retrained checkpoint. The numbers above are 0.3.5 and
+stand. A re-run on 0.3.20 with neutral `labels` (`bench/laya_compare.py --noul-labels`) is in progress
+and will be added here.
+
 ## Speed, measured on the same GPU
 
 Speed is Laya's main claim, so it deserves a like-for-like number rather than its authors' hardware
@@ -113,7 +123,8 @@ is roughly halved unless you ask in one order only. Read the timings with care:
 ## A methodology bug we made, and what it cost
 
 Our first run appended the yes/no definitions to the instructions as prose, because Laya's docstring
-lists `criteria` only for `choice` and `score`. That was wrong: `agent._to_internal` passes `criteria`
+listed `criteria` only for `choice` and `score` (fixed upstream in 0.3.7 after our report,
+[#146](https://github.com/NandhaKishorM/laya/pull/146)). That was wrong: `agent._to_internal` passes `criteria`
 through for **every** question type, and Laya's own presets use `noul` criteria. Same checkpoint, same
 pairs, same machine:
 
