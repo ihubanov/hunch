@@ -26,13 +26,23 @@ from hunch.qualify import (  # noqa: E402
     GATE, Criteria, Report, accuracy_at_gate, auroc, ece, print_report, verdict)
 
 
-def question_def(check: dict, vague: bool) -> dict:
+def question_def(check: dict, vague: bool, labels: dict | None = None) -> dict:
     """A Laya noul question. Laya reads `criteria` for every type, so the definitions go there
-    (its docstring lists criteria only for choice/score, but agent._to_internal passes it through)."""
+    (documented for noul since laya 0.3.7). `labels` (laya >= 0.3.11) replaces the option words
+    `true:` / `false:` the model sees; the returned value is still P(true)."""
     q = {"type": "noul", "instructions": check["question"]}
     if not vague and (check.get("yes_if") or check.get("no_if")):
         q["criteria"] = {"true": check.get("yes_if"), "false": check.get("no_if")}
+    if labels:
+        q["labels"] = labels
     return q
+
+
+# --noul-labels: neutral option words for noul (laya#163). "once" is one call per question;
+# "both" also asks with the words swapped and averages, so a preference for either word cancels.
+# The slot order stays false-then-true either way: labels change the words, not the positions.
+NOUL_LABELS = {"once": [{"true": "A", "false": "B"}],
+               "both": [{"true": "A", "false": "B"}, {"true": "B", "false": "A"}]}
 
 
 SEMANTIC_KEYS = {"old": "old_assertion", "new": "new_assertion", "a": "assertion_a", "b": "assertion_b"}
@@ -69,8 +79,8 @@ def _p_yes(answer, yes_key: str) -> float:
     return 1.0 if answer.get("choice") == yes_key else 0.0
 
 
-def run(agent, items: list[dict], vague: bool, semantic: bool = False,
-        as_choice: bool = False) -> tuple[list[float | None], float]:
+def run(agent, items: list[dict], vague: bool, semantic: bool = False, as_choice: bool = False,
+        noul_labels: str | None = None) -> tuple[list[float | None], float]:
     out, t0 = [], time.perf_counter()
     for it in items:
         try:
@@ -79,6 +89,10 @@ def run(agent, items: list[dict], vague: bool, semantic: bool = False,
                 ps = []
                 for qdef, yes_key in choice_defs(it["check"], vague):
                     ps.append(_p_yes(agent.predict(context, {"q": qdef})["answers"]["q"], yes_key))
+                out.append(sum(ps) / len(ps))
+            elif noul_labels:
+                ps = [_p_yes(agent.predict(context, {"q": question_def(it["check"], vague, lab)})["answers"]["q"], "A")
+                      for lab in NOUL_LABELS[noul_labels]]
                 out.append(sum(ps) / len(ps))
             else:
                 answer = agent.predict(context, {"q": question_def(it["check"], vague)})["answers"]["q"]
@@ -100,10 +114,15 @@ def main() -> int:
                          "per NandhaKishorM/laya#156: noul hardcodes true:/false: option labels, and those "
                          "label words can decide the answer. Runs both key orders and averages, so a "
                          "position preference cancels out.")
+    ap.add_argument("--noul-labels", choices=sorted(NOUL_LABELS),
+                    help="ask as noul with neutral option words A/B instead of true/false (laya >= 0.3.11, "
+                         "laya#163). once: one call per question; both: also swapped, averaged")
     ap.add_argument("--semantic-keys", action="store_true",
                     help="rename the context keys old/new -> old_assertion/new_assertion and a/b -> "
                          "assertion_a/assertion_b, as recommended in NandhaKishorM/laya#135")
     a = ap.parse_args()
+    if a.as_choice and a.noul_labels:
+        ap.error("--as-choice and --noul-labels are alternative framings; pick one")
 
     import laya  # noqa: PLC0415  (imported here so --help works without the dependency)
 
@@ -113,21 +132,24 @@ def main() -> int:
     load_s = time.perf_counter() - t0
     items = build()
     labels = [it["label"] for it in items]
-    print(f"{a.model} loaded in {load_s:.1f}s; {len(items)} labelled pairs"
+    version = getattr(laya, "__version__", "unknown")
+    print(f"{a.model} (laya {version}) loaded in {load_s:.1f}s; {len(items)} labelled pairs"
           f"{'; semantic context keys' if a.semantic_keys else ''}"
-          f"{'; asked as a two-option choice, both orders' if a.as_choice else ''}")
+          f"{'; asked as a two-option choice, both orders' if a.as_choice else ''}"
+          f"{f'; noul with neutral labels ({a.noul_labels})' if a.noul_labels else ''}")
 
     runs, per_item_ms = [], None
     for i in range(a.runs):
-        ps, ms = run(agent, items, vague=False, semantic=a.semantic_keys, as_choice=a.as_choice)
+        ps, ms = run(agent, items, vague=False, semantic=a.semantic_keys, as_choice=a.as_choice, noul_labels=a.noul_labels)
         runs.append(ps)
         per_item_ms = ms if per_item_ms is None else per_item_ms
         print(f"  named run {i + 1}/{a.runs}: {ms:.0f} ms per question")
-    vague_ps, vague_ms = run(agent, items, vague=True, semantic=a.semantic_keys, as_choice=a.as_choice)
+    vague_ps, vague_ms = run(agent, items, vague=True, semantic=a.semantic_keys, as_choice=a.as_choice, noul_labels=a.noul_labels)
     print(f"  vague run: {vague_ms:.0f} ms per question")
 
     scored = [(p, y) for p, y in zip(runs[0], labels) if p is not None]
-    r = Report(model=f"laya:{a.model}{' (as choice)' if a.as_choice else ''}", backend_model=a.model)
+    framing = " (as choice)" if a.as_choice else f" (noul labels {a.noul_labels})" if a.noul_labels else ""
+    r = Report(model=f"laya:{a.model}{framing}", backend_model=a.model)
     r.accuracy = round(accuracy_at_gate(runs[0], labels), 1)
     r.accuracy_vague = round(accuracy_at_gate(vague_ps, labels), 1)
     scored_vague = [(p, y) for p, y in zip(vague_ps, labels) if p is not None]
@@ -147,7 +169,7 @@ def main() -> int:
     print(f"   median latency: {per_item_ms:.0f} ms per question (gate {GATE})")
     if a.json_path:
         with open(a.json_path, "w") as f:
-            json.dump({"model": a.model, "device": a.device, "load_seconds": round(load_s, 1),
+            json.dump({"model": a.model, "laya_version": version, "device": a.device, "load_seconds": round(load_s, 1),
                        "ms_per_question": round(per_item_ms, 1), "report": r.__dict__}, f, indent=1)
     return 0 if r.qualified else 1
 
