@@ -92,6 +92,31 @@ def _correct(check: dict, result: dict, expected) -> bool:
     return round(result["value"]) == expected
 
 
+def _png(size: int = 32, rgb: tuple[int, int, int] = (220, 30, 30)) -> str:
+    """A solid-colour PNG as a data URL, built without an imaging library."""
+    import base64
+    import struct
+    import zlib
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+    raw = b"".join(b"\x00" + bytes(rgb) * size for _ in range(size))
+    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+    return "data:image/png;base64," + base64.b64encode(png).decode()
+
+
+async def image_support(engine: Engine, spec) -> str:
+    """Informational: can this model judge images? Text-only models are fine for text checks."""
+    check = {"kind": "yesno", "question": "Is IMAGE 1 mostly red?"}
+    try:
+        results, _ = await engine.judge(spec, "", {"c": check}, [_png()])
+    except HunchError as e:
+        return "not supported (text-only model)" if e.code == "images_not_supported" else f"unknown ({e.code})"
+    p = results["c"]["p_yes"]
+    return f"accepted (a red square is red: p_yes {p:.2f})" if p >= 0.5 else f"accepted, but misjudged a red square (p_yes {p:.2f})"
+
+
 async def run(names: list[str]) -> int:
     s = load_settings()
     names = names or list(s.models)
@@ -120,7 +145,9 @@ async def run(names: list[str]) -> int:
                 failures += 1
                 continue
             print("ok   model is served")
-            problem = await probe_constraint(client, s, spec, headers, deliberate=(spec.mode == "deliberate"))
+            # the RESOLVED mode: with mode="auto" a thinking model needs the deliberate-sized probe
+            mode = await engine.mode_for(spec)
+            problem = await probe_constraint(client, s, spec, headers, deliberate=(mode == "deliberate"))
             if problem:
                 print(f"FAIL {problem}")
                 failures += 1
@@ -140,6 +167,7 @@ async def run(names: list[str]) -> int:
             failures += not ok
             print(f"{'ok  ' if ok else 'FAIL'} mini-benchmark {passed}/{len(CASES)} correct, "
                   f"~{(time.perf_counter() - t0) * 1000 / len(CASES):.0f} ms per request")
+            print(f"info images: {await image_support(engine, spec)}")
     print("\nSELFTEST", "PASSED" if not failures else f"FAILED ({failures})")
     return 1 if failures else 0
 

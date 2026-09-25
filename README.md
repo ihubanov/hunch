@@ -122,13 +122,14 @@ Errors come back as `{"error": {"code": "...", "message": "..."}}`:
 
 | HTTP | `code` | When |
 | --- | --- | --- |
-| 400 | `invalid_request`, `unknown_model`, `too_many_options`, `too_many_levels`, `too_many_images` | Bad input (unknown fields are rejected) |
+| 400 | `invalid_request`, `unknown_model`, `too_many_options`, `too_many_levels`, `too_many_images`, `images_not_supported` (images sent to a text-only model) | Bad input (unknown fields are rejected) |
 | 401 | `unauthorized` | `HUNCH_API_KEYS` is set and the bearer key is missing or wrong |
 | 413 | `context_too_long` | The context plus the question exceed the model's context window |
 | 502 | `backend_error` | The backend returned an error, or did **not** enforce the constraint (never turned into a made-up probability) |
 | 503 | `backend_unavailable` | Still failing after retries (429 / 5xx / timeouts, with `Retry-After` honoured) |
 
-`GET /v1/models` lists the configured models. `GET /health` checks that the backend serves them.
+`GET /v1/models` lists the configured models, each with the `mode` its checks actually run in (`one_token` or
+`deliberate`; `auto` is resolved, with the configured value in `configured_mode`). `GET /health` checks that the backend serves them.
 
 ## Why logprobs instead of asking for JSON
 
@@ -172,7 +173,7 @@ res = judge(
     {"replaces": {"kind": "yesno",
                   "question": "Does `new` replace `old`'s value for the same thing?",
                   "yes_if": "same thing, changed value",
-                  "no_if": "the same value restated, or a different thing"}},
+                  "no_if": "the same value restated, only more detail added, or a different thing"}},
 )
 p = res["replaces"]["p_yes"]
 if p >= 0.9:
@@ -466,7 +467,10 @@ counts as qualified if either mode passes.
 - **Name the look-alike.** Say what counts as *no* for the case that looks most like *yes*. On the bundled
   benchmark, dropping `yes_if` / `no_if` costs 17–24 accuracy points on every model tested
   (see [vague checks](#same-benchmark-vague-checks)). One sentence in `no_if` ("restating the same value, or a
-  different thing") is most of the fix.
+  different thing") is most of the fix. Look for more than one look-alike: on memory-style pairs, a "replaces" or
+  "duplicate" check that doesn't also say *adding detail is not a replacement (or a duplicate)* called refinements
+  ("machine parts" → "machine parts, mostly pumps and valves") replacements at p = 1.0 on one model. A threshold
+  can't catch that; naming the case fixes it.
 - **Definitions go in `yes_if` / `no_if` and option descriptions,** not only in the question.
 - **One judgment per check.** Split "is this a good candidate?" into several checks and combine them in code.
 - **Keep arithmetic, counting, dates and IDs in code.** Give the model only the judgment.

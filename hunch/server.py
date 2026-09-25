@@ -95,10 +95,20 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
                 "latency_ms": round((time.perf_counter() - t0) * 1000)}
 
     @app.get("/v1/models", dependencies=[Depends(auth)])
-    async def models():
-        return {"models": [{"name": s.name, "backend_model": s.backend_model, "description": s.description,
-                            "debias": s.debias, "default": s.name == settings.default_model}
-                           for s in settings.models.values()]}
+    async def models(request: Request):
+        engine: Engine = request.app.state.engine
+        out = []
+        for s in settings.models.values():
+            # `mode` is what checks actually run in: "auto" is resolved (one probe, cached), because the
+            # configured value alone can't tell a reader whether answers are one token or deliberate.
+            try:
+                mode = await engine.mode_for(s)
+            except HunchError:
+                mode = None
+            out.append({"name": s.name, "backend_model": s.backend_model, "description": s.description,
+                        "debias": s.debias, "mode": mode, "configured_mode": s.mode,
+                        "default": s.name == settings.default_model})
+        return {"models": out}
 
     @app.get("/health")
     async def health(request: Request):

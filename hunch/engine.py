@@ -46,6 +46,16 @@ def effective_extra_body(spec: ModelSpec, deliberate: bool) -> dict:
     return extra
 
 
+# How vLLM (and some gateways) refuse image input on a text-only model, e.g. "At most 0 image(s) may be provided".
+IMAGE_REFUSALS = ("at most 0 image", "not a multimodal", "does not support image", "image input is not supported",
+                  "multimodal inputs are not supported", "images are not supported")
+
+
+def _has_images(body: dict) -> bool:
+    return any(isinstance(m.get("content"), list) and any(p.get("type") == "image_url" for p in m["content"])
+               for m in body.get("messages", []))
+
+
 class HunchError(Exception):
     """Returned to the client as {"error": {"code": code, "message": message}} with this HTTP status."""
 
@@ -138,6 +148,9 @@ class Engine:
                 continue
             if r.status_code >= 400:
                 text = r.text[:400]
+                if _has_images(body) and any(k in text.lower() for k in IMAGE_REFUSALS):
+                    raise HunchError(400, "images_not_supported",
+                                     f"model {spec.name!r} ({spec.backend_model}) does not accept images: {text[:200]}")
                 if any(k in text.lower() for k in ("context length", "maximum context", "too long")):
                     raise HunchError(413, "context_too_long", "context plus question exceed the backend model's context window")
                 raise HunchError(502, "backend_error", f"backend HTTP {r.status_code}: {text}")

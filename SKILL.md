@@ -48,7 +48,9 @@ server's configured model.
 1. **Name the look-alike case.** For every check, ask: what looks like *yes* but is *no*? Put it in
    `no_if` (or in an option description). This is the single highest-value thing you do: vague checks
    cost 17-24 accuracy points on every current model, and "does NEW replace OLD?" without it read
-   restatements as replacements 39 times out of 40 on one model.
+   restatements as replacements 39 times out of 40 on one model. There is often more than one: for
+   replace/duplicate checks also name *only adds detail* (a refinement is neither), or a model can call
+   refinements replacements at p = 1.0, which no threshold catches.
 2. **Definitions belong in `yes_if` / `no_if` and option descriptions,** not only in the question.
 3. **One judgment per check.** Split "is this a good candidate?" into separate checks and combine them
    in your code, where you can change a weight without touching a prompt.

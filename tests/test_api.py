@@ -632,3 +632,56 @@ def test_definitions_drop_can_be_made_strict_again():
     r = verdict(Report(model="m", backend_model="b", accuracy=97.4, accuracy_vague=97.8, ece=0.05, flip_rate=0.0),
                 Criteria(max_definitions_drop=0))
     assert r.qualified is False and any("WORSE" in reason for reason in r.reasons)
+
+
+
+def test_models_reports_the_resolved_mode():
+    settings = replace(SETTINGS, models={"fast": SETTINGS.models["fast"],
+                                         "auto": replace(SETTINGS.models["fast"], name="auto", mode="auto")})
+    c, _ = client(settings, scratchpad=True, think_tokens=2)
+    with c:
+        models = {m["name"]: m for m in c.get("/v1/models").json()["models"]}
+    assert (models["fast"]["mode"], models["fast"]["configured_mode"]) == ("one_token", "one_token")
+    assert (models["auto"]["mode"], models["auto"]["configured_mode"]) == ("deliberate", "auto")
+
+
+def test_images_on_a_text_only_model_get_a_clear_error():
+    def handler(request):
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "org/fast-model"}]})
+        return httpx.Response(400, json={"error": {"message": "At most 0 image(s) may be provided in one prompt. (parameter=image)"}})
+    c = TestClient(create_app(SETTINGS, transport=httpx.MockTransport(handler)))
+    with c:
+        r = c.post("/v1/judge", json={"images": [PNG], "checks": {"q": {"kind": "yesno", "question": "red?"}}})
+        text_only = c.post("/v1/judge", json={"context": "x", "checks": {"q": {"kind": "yesno", "question": "red?"}}})
+    assert r.status_code == 400 and r.json()["error"]["code"] == "images_not_supported"
+    assert "does not accept images" in r.json()["error"]["message"]
+    assert text_only.json()["error"]["code"] == "backend_error"   # same refusal text without images: not relabelled
+
+
+def test_selftest_png_is_a_valid_image():
+    import base64
+    import struct
+    import zlib
+    from hunch.selftest import _png
+    raw = base64.b64decode(_png(8).split(",", 1)[1])
+    assert raw[:8] == b"\x89PNG\r\n\x1a\n"
+    width, height = struct.unpack(">II", raw[16:24])
+    assert (width, height) == (8, 8)
+    idat_len = struct.unpack(">I", raw[33:37])[0]
+    assert len(zlib.decompress(raw[41:41 + idat_len])) == 8 * (1 + 8 * 3)
+
+
+
+def test_selftest_probes_an_auto_model_in_its_resolved_mode(monkeypatch, capsys):
+    import asyncio
+    import functools
+    from hunch import selftest
+    settings = replace(SETTINGS, models={"m": replace(SETTINGS.models["fast"], mode="auto")})
+    transport, state = fake_backend(scratchpad=True, think_tokens=3)
+    monkeypatch.setattr(selftest, "load_settings", lambda: settings)
+    monkeypatch.setattr(selftest.httpx, "AsyncClient", functools.partial(httpx.AsyncClient, transport=transport))
+    asyncio.run(selftest.run([]))
+    out = capsys.readouterr().out
+    assert "NOT enforced" not in out and "structured_outputs enforced" in out
+    assert state["bodies"][0]["max_tokens"] > 16   # the probe got a thinking budget, not a one-token cap
