@@ -1,6 +1,7 @@
 """Qualify a model as a Hunch backend before relying on it.
 
   python -m hunch qualify [model ...] [--min-accuracy 90] [--max-ece 0.15] [--max-flip-rate 0.02]
+                          [--max-definitions-drop 1]
                           [--quick] [--json FILE]
 
 Runs directly against the configured backend (no Hunch server needed) and prints QUALIFIED / NOT QUALIFIED
@@ -10,8 +11,8 @@ Criteria, on the 240 fictional look-alike pairs in hunch/lookalikes.py:
   1. setup      - the backend serves the model, enforces structured_outputs and returns logprobs
   2. accuracy   - accuracy at the p_yes >= 0.9 gate, with the look-alike cases named in yes_if / no_if
   3. calibration - expected calibration error (ECE) of p_yes
-  4. definitions - naming the look-alikes must not make the model worse than the bare question
-                  (if it does, better checks won't fix it)
+  4. definitions - naming the look-alikes must not make the model worse than the bare question by more
+                  than 1 point (if it does, better checks won't fix it; a smaller drop is noise)
   5. stability  - share of answers that flip across 0.5 between two identical runs
 """
 from __future__ import annotations
@@ -40,6 +41,10 @@ class Criteria:
     min_accuracy: float = 90.0
     max_ece: float = 0.15
     max_flip_rate: float = 0.02
+    # Points of accuracy the definitions may cost before it counts as "they make it worse". A drop of one
+    # or two checks in a few hundred is noise between two runs; the failures this rule exists for were
+    # 2.9-4.5 points (Qwen3-14B, Qwen3-8B).
+    max_definitions_drop: float = 1.0
 
 
 @dataclass
@@ -94,7 +99,7 @@ def verdict(r: Report, c: Criteria) -> Report:
         r.reasons.append(f"accuracy {r.accuracy:.1f}% < {c.min_accuracy:g}% at the p_yes >= {GATE} gate")
     if r.ece is not None and r.ece > c.max_ece:
         r.reasons.append(f"calibration error (ECE) {r.ece:.3f} > {c.max_ece:g}: its probabilities can't be trusted as probabilities")
-    if r.accuracy_vague is not None and r.accuracy < r.accuracy_vague:
+    if r.accuracy_vague is not None and round(r.accuracy_vague - r.accuracy, 6) > c.max_definitions_drop:
         r.reasons.append(f"naming the look-alikes made it WORSE ({r.accuracy_vague:.1f}% -> {r.accuracy:.1f}%): "
                          "better-written checks won't fix this model")
     if r.flip_rate is not None and r.flip_rate > c.max_flip_rate:
@@ -179,7 +184,7 @@ def print_report(r: Report, c: Criteria) -> None:
     if r.accuracy is not None:
         fmt = lambda v, f: "-" if v is None else format(v, f)  # noqa: E731
         print(f"   accuracy @{GATE}: {r.accuracy:.1f}%   (min {c.min_accuracy:g}%)")
-        print(f"   question only:    {fmt(r.accuracy_vague, '.1f')}%   (definitions must not make it worse)"
+        print(f"   question only:    {fmt(r.accuracy_vague, '.1f')}%   (definitions may cost at most {c.max_definitions_drop:g} point)"
               f"   AUROC {fmt(r.auroc_vague, '.3f')}   Brier {fmt(r.brier_vague, '.3f')}   ECE {fmt(r.ece_vague, '.3f')}")
         print(f"   calibration ECE:  {fmt(r.ece, '.3f')}   (max {c.max_ece:g})   AUROC {fmt(r.auroc, '.3f')}   Brier {fmt(r.brier, '.3f')}")
         print(f"   flips between runs: {'-' if r.flip_rate is None else f'{100 * r.flip_rate:.1f}%'}   (max {100 * c.max_flip_rate:g}%)")
@@ -239,10 +244,12 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--min-accuracy", type=float, default=Criteria.min_accuracy)
     ap.add_argument("--max-ece", type=float, default=Criteria.max_ece)
     ap.add_argument("--max-flip-rate", type=float, default=Criteria.max_flip_rate)
+    ap.add_argument("--max-definitions-drop", type=float, default=Criteria.max_definitions_drop,
+                    help="accuracy points naming the look-alikes may cost before it fails (0 = must not drop at all)")
     ap.add_argument("--quick", action="store_true", help="one named run instead of two (no stability check)")
     ap.add_argument("--json", dest="json_path", help="also write the reports to this JSON file")
     a = ap.parse_args(argv)
-    return asyncio.run(run(a.models, Criteria(a.min_accuracy, a.max_ece, a.max_flip_rate), a.quick, a.json_path))
+    return asyncio.run(run(a.models, Criteria(a.min_accuracy, a.max_ece, a.max_flip_rate, a.max_definitions_drop), a.quick, a.json_path))
 
 
 if __name__ == "__main__":

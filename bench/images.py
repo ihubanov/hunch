@@ -7,7 +7,7 @@ for each), labelled by hand for eight yes/no questions a news or monitoring pipe
 comes with its look-alike: a flooded street vs a wet one, a protest vs a concert crowd, a building on fire
 vs one lit red by fireworks, earthquake rubble vs a demolition site, and so on.
 
-Scored exactly like `python -m hunch qualify` (accuracy at p_yes >= 0.9, ECE, definitions must not hurt,
+Scored exactly like `python -m hunch qualify` (accuracy at p_yes >= 0.9, ECE, definitions cost at most 1 point,
 flips between two identical runs), against the models configured in hunch.toml. Images are downloaded
 once to ~/.cache/hunch-images and sent inline as data URLs, since backends often have no internet access;
 --pass-urls sends the Commons URLs instead.

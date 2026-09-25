@@ -248,6 +248,9 @@ def test_lookalikes_dataset_is_balanced_and_fictional():
     (dict(accuracy=85.0, accuracy_vague=80.0, ece=0.05, flip_rate=0.0), False, "accuracy"),
     (dict(accuracy=96.0, accuracy_vague=72.0, ece=0.18, flip_rate=0.0), False, "ECE"),
     (dict(accuracy=91.0, accuracy_vague=95.0, ece=0.05, flip_rate=0.0), False, "WORSE"),
+    (dict(accuracy=97.4, accuracy_vague=97.8, ece=0.05, flip_rate=0.0), True, None),     # 0.4-point drop: noise
+    (dict(accuracy=96.8, accuracy_vague=97.8, ece=0.05, flip_rate=0.0), True, None),     # exactly 1 point: allowed
+    (dict(accuracy=96.7, accuracy_vague=97.8, ece=0.05, flip_rate=0.0), False, "WORSE"),  # just over
     (dict(accuracy=96.0, accuracy_vague=80.0, ece=0.05, flip_rate=0.05), False, "flip"),
 ])
 def test_verdict(fields, qualified, needle):
@@ -623,3 +626,9 @@ def test_bad_images_are_rejected(images, code):
         r = c.post("/v1/judge", json={"images": images, "checks": {"q": {"kind": "yesno", "question": "x?"}}})
     assert r.status_code == 400 and r.json()["error"]["code"] == code
     assert state["bodies"] == []
+
+
+def test_definitions_drop_can_be_made_strict_again():
+    r = verdict(Report(model="m", backend_model="b", accuracy=97.4, accuracy_vague=97.8, ece=0.05, flip_rate=0.0),
+                Criteria(max_definitions_drop=0))
+    assert r.qualified is False and any("WORSE" in reason for reason in r.reasons)
