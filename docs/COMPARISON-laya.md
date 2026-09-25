@@ -204,6 +204,8 @@ with no errors, and the flag is in the repo so either variant can be reproduced.
   values outside the expected range, which the library clamps, and it says confidence from the affected
   bucket is uncalibrated. The named bucket is not the `noul` path used here, but since our finding is
   about calibration, it is worth recording.
+- **Text only.** Laya's checkpoints are ModernBERT text encoders, so they take no image input. Hunch also judges
+  images on vision models (see the README's *Images* section); that comparison is out of scope here.
 - **Different category.** Laya is a Python library, not an OpenAI-compatible server, so it cannot be a
   Hunch backend today. This is a comparison of approaches, not of two interchangeable parts.
 

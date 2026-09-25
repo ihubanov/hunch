@@ -1,12 +1,18 @@
 # Hunch
 
-**Calibrated yes/no, pick-one and scale judgments from your own LLMs, read straight off the logprobs.**
+**Calibrated yes/no, pick-one and scale judgments from your own LLMs — on text and on images — read straight off the logprobs.**
 
 A lot of code needs a small judgment that plain logic can't express: *is this message asking for a refund?
 Which team should handle this ticket? How severe is this alert? Does this new fact replace the old one?*
 The usual answer is a pile of `if/else` branches and regexes, or a chat prompt whose free-text answer you then
 parse. Hunch replaces both with one typed call. You describe the check, and it returns a probability your code
 can threshold, not a paragraph.
+
+It works on photos too. *Does this photo show flooding? Does it show the event in the headline? Is this a protest or
+a concert crowd?* Send the image with the check and get a probability you can gate at 0.9, the same as for text. On
+188 hand-labelled look-alike photos (a flooded street vs a wet one, earthquake rubble vs a demolition site, a building
+on fire vs one lit by fireworks), three vision models qualify, with Gemma-4-31B at **98.4%** and calibration error
+0.016. See [Images](#images).
 
 - **Typed checks:** `yesno` → `p_yes`, `pick` (one of up to 300 options) → the best option and a full
   distribution, `scale` (up to 10 ordered levels) → an expected value and a distribution. Every answer carries a
