@@ -5,3 +5,5 @@ __pycache__/
 server.log
 hunch.toml
 *.egg-info/
+build/
+dist/

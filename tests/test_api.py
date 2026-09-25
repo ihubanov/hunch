@@ -720,3 +720,17 @@ def test_per_request_effort_is_ignored_on_a_one_token_model():
                                       "effort": "low"})
     assert r.status_code == 200, r.text
     assert state["bodies"][-1]["reasoning_effort"] == "none"   # thinking stays off
+
+
+def test_no_build_artifacts_are_tracked():
+    # A committed build/ let `pip install <checkout>` serve stale modules under the current version string
+    # on some toolchains (seen in the field: v1.5.1 labels everywhere, pre-1.3 server code).
+    import pathlib
+    import shutil
+    import subprocess
+    root = pathlib.Path(__file__).resolve().parents[1]
+    if not shutil.which("git") or not (root / ".git").exists():
+        pytest.skip("not a git checkout")
+    tracked = subprocess.run(["git", "ls-files", "build", "dist", "*.egg-info"], cwd=root,
+                             capture_output=True, text=True).stdout.split()
+    assert tracked == []
