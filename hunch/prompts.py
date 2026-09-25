@@ -3,6 +3,7 @@ the parallel per-check calls of one request."""
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any
 
 SYSTEM = (
@@ -19,15 +20,30 @@ def render(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=1)
 
 
-def context_block(context: Any) -> str:
-    return "CONTEXT:\n" + render(context)
+@dataclass(frozen=True)
+class Context:
+    """Rendered context: text plus any images, which belong to CONTEXT and come before the question."""
+    text: str
+    images: tuple[str, ...] = ()
 
 
-def messages(context_text: str, question_text: str) -> list[dict]:
-    return [
-        {"role": "system", "content": SYSTEM},
-        {"role": "user", "content": f"{context_text}\n\n{question_text}"},
-    ]
+def context_block(context: Any, images: list[str] | tuple[str, ...] = ()) -> str | Context:
+    text = "CONTEXT:\n" + render(context)
+    return Context(text, tuple(images)) if images else text   # text-only prompts stay byte-identical
+
+
+def messages(context: str | Context, question_text: str) -> list[dict]:
+    if isinstance(context, str):
+        return [
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": f"{context}\n\n{question_text}"},
+        ]
+    parts: list[dict] = [{"type": "text", "text": context.text}]
+    for i, url in enumerate(context.images, 1):
+        parts.append({"type": "text", "text": f"\nIMAGE {i}:"})
+        parts.append({"type": "image_url", "image_url": {"url": url}})
+    parts.append({"type": "text", "text": f"\n\n{question_text}"})
+    return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": parts}]
 
 
 def yesno(question: Any, yes_if: Any = None, no_if: Any = None, n_first: bool = False) -> str:

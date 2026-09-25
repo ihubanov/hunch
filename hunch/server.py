@@ -20,12 +20,28 @@ from .engine import THINKING_OFF_EFFORTS, Engine, HunchError, validate_checks
 
 class JudgeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    context: str | dict[str, Any] | list[Any]
+    context: str | dict[str, Any] | list[Any] = ""
     checks: dict[str, Any]
+    # Images for a vision model: http(s) URLs the backend can fetch, or data:image/...;base64 URLs.
+    # They are part of the context, numbered IMAGE 1..n, so questions can refer to them.
+    images: list[str] | None = None
     model: str | None = None
     # Per-request thinking effort for deliberate-mode models ("low" / "high" / "max"): trade cost for
     # stability on this call only. Ignored by backends that don't support it.
     effort: str | None = None
+
+
+MAX_IMAGES = 8
+
+
+def validate_images(images: list[str] | None) -> None:
+    if not images:
+        return
+    if len(images) > MAX_IMAGES:
+        raise HunchError(400, "too_many_images", f"at most {MAX_IMAGES} images per request, got {len(images)}")
+    for i, url in enumerate(images, 1):
+        if not isinstance(url, str) or not url.startswith(("http://", "https://", "data:image/")):
+            raise HunchError(400, "invalid_request", f"image {i} must be an http(s) URL or a data:image/... URL")
 
 
 def _error(status: int, code: str, message: str) -> JSONResponse:
@@ -70,8 +86,9 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
                                  f"effort {req.effort!r} would switch thinking off; use mode=one_token instead")
             spec = replace(spec, extra_body={**spec.extra_body, "reasoning_effort": req.effort})
         checks = validate_checks(req.checks, engine.max_options)
+        validate_images(req.images)
         t0 = time.perf_counter()
-        results, usage = await engine.judge(spec, req.context, checks)
+        results, usage = await engine.judge(spec, req.context, checks, req.images)
         return {"model": spec.name, "results": results,
                 "usage": {"prompt_tokens": usage.prompt_tokens, "completion_tokens": usage.completion_tokens,
                           "backend_calls": usage.backend_calls},

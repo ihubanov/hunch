@@ -289,8 +289,9 @@ class Engine:
                 "probs": [round(x, 4) for x in probs], "confidence": round(confidence(probs), 4)}, usage
 
     # ------------------------------------------------------------------ request
-    async def judge(self, spec: ModelSpec, context: Any, checks: dict[str, dict]) -> tuple[dict, Usage]:
-        ctx = prompts.context_block(context)
+    async def judge(self, spec: ModelSpec, context: Any, checks: dict[str, dict],
+                    images: list[str] | None = None) -> tuple[dict, Usage]:
+        ctx = prompts.context_block(context, images or ())
         handlers = {"yesno": self.yesno, "pick": self.pick, "scale": self.scale}
         tasks = {cid: asyncio.ensure_future(handlers[c["kind"]](spec, ctx, c)) for cid, c in checks.items()}
         try:

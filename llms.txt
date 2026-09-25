@@ -9,8 +9,9 @@
 
 ## Quick facts
 
-- Endpoint: `POST /v1/judge` with `context` (string, object or array) and `checks` (your ids -> check).
+- Endpoint: `POST /v1/judge` with `context` (string, object or array), `checks` (your ids -> check), and optional `images` (up to 8 http(s) or data: URLs, for vision models).
 - Check kinds: `yesno` (-> `p_yes`), `pick` (1-300 options -> `pick`, `probs`, `confidence`), `scale` (1-10 ordered levels -> `value`, `probs`, `confidence`).
 - Also: `GET /v1/models`, `GET /health`, `python -m hunch selftest`, `python -m hunch qualify <model>`.
 - The highest-value rule: name the look-alike case in `no_if` / option descriptions. Vague checks cost 17-24 accuracy points.
-- Reasoning models are a poor fit: Hunch allows one token with thinking off.
+- Thinking models: set `mode = "deliberate"` (think first, constrain only the verdict token). `qualify` tries it automatically when one-token mode fails.
+- Images: qualified on 188 hand-labelled look-alike photos (Gemma-4-31B 98.4%, ECE 0.016); benchmark in `bench/images.py`.

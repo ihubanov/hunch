@@ -48,6 +48,8 @@ def fake_backend(prose=False, fail_first=0, status=504, scratchpad=False, think_
         state["bodies"].append(body)
         labels = body["structured_outputs"]["choice"]
         user = body["messages"][-1]["content"]
+        if isinstance(user, list):  # multimodal: judge on the text parts
+            user = "\n".join(part.get("text", "") for part in user)
         if labels == ["Y", "N"]:
             pref = "Y" if "yes-please" in user else "N"
         else:
@@ -575,3 +577,49 @@ def test_qualify_reruns_a_thinking_capable_model_in_deliberate_mode(monkeypatch,
     assert reports[0]["can_think"] is True and reports[0]["opens_scratchpad"] is False
     assert reports[1]["mode"] == "deliberate"
     assert code == 1   # the fake answers "no" to everything, so neither mode qualifies
+
+
+# ---------------------------------------------------------------- images
+PNG = "data:image/png;base64,iVBORw0KGgo="
+
+
+def test_images_are_sent_as_content_parts_after_the_context():
+    c, state = client()
+    with c:
+        r = c.post("/v1/judge", json={"context": {"headline": "Floods hit the area"}, "images": [PNG, "https://x.test/a.jpg"],
+                                      "checks": {"q": {"kind": "yesno", "question": "yes-please: does IMAGE 1 show it?"}}})
+    assert r.status_code == 200, r.text
+    parts = state["bodies"][0]["messages"][-1]["content"]
+    assert [p["type"] for p in parts] == ["text", "text", "image_url", "text", "image_url", "text"]
+    assert parts[0]["text"].startswith("CONTEXT:") and "Floods hit the area" in parts[0]["text"]
+    assert parts[1]["text"].strip() == "IMAGE 1:" and parts[2]["image_url"]["url"] == PNG
+    assert parts[4]["image_url"]["url"] == "https://x.test/a.jpg"
+    assert "QUESTION" in parts[-1]["text"]
+    assert r.json()["results"]["q"]["p_yes"] == pytest.approx(0.7 / 0.9, abs=1e-3)
+
+
+def test_text_only_prompt_is_unchanged_by_image_support():
+    c, state = client()
+    with c:
+        judge(c, {"q": {"kind": "yesno", "question": "yes-please?"}})
+    assert isinstance(state["bodies"][0]["messages"][-1]["content"], str)
+
+
+def test_image_only_request_needs_no_context():
+    c, _ = client()
+    with c:
+        r = c.post("/v1/judge", json={"images": [PNG], "checks": {"q": {"kind": "yesno", "question": "flood?"}}})
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize("images,code", [
+    (["file:///etc/passwd"], "invalid_request"),
+    (["data:text/html;base64,AAAA"], "invalid_request"),
+    ([PNG] * 9, "too_many_images"),
+])
+def test_bad_images_are_rejected(images, code):
+    c, state = client()
+    with c:
+        r = c.post("/v1/judge", json={"images": images, "checks": {"q": {"kind": "yesno", "question": "x?"}}})
+    assert r.status_code == 400 and r.json()["error"]["code"] == code
+    assert state["bodies"] == []

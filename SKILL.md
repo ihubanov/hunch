@@ -36,6 +36,9 @@ Authorization: Bearer {key}        # only if the deployment sets HUNCH_API_KEYS
 }
 ```
 
+Add `"images": ["https://...", "data:image/jpeg;base64,..."]` (up to 8) to ask about photos on a vision
+model; they become part of the context as `IMAGE 1`…`IMAGE n`, and `context` may then be omitted.
+
 Results come back under your own ids: `yesno` → `p_yes`; `pick` → `pick`, `probs`, `confidence`;
 `scale` → `value` (expected level), `probs`, `confidence`. `model` is optional and defaults to the
 server's configured model.
@@ -83,13 +86,16 @@ python -m hunch qualify <model>   # ~1 minute: verdict with reasons, on 240 labe
 
 `qualify` checks accuracy at the 0.9 gate (≥ 90%), calibration (ECE ≤ 0.15), that naming the
 look-alikes does not make the model *worse*, and stability between identical runs. Models that pass on
-the bundled benchmark include Qwen3.5-397B, Qwen3.8-27B, Qwen3.6-35B-A3B and Gemma-4-31B.
+the bundled benchmark include Qwen3.5-397B, Qwen3.8-27B, Qwen3.6-35B-A3B, Gemma-4-31B, and GLM-5.3 and
+DeepSeek-V4.1-Flash in deliberate mode. For images, `python bench/images.py` runs the same criteria on
+188 labelled look-alike photos; Gemma-4-31B, Qwen3.5-397B and Qwen3.8-Flash-Next pass.
 
 ## What not to do
 
-- **Don't use a reasoning model.** Hunch gives it one token with thinking off. GLM-5.3 scores 68.3%
-  that way and 98.3% when allowed to think first: it knows the answer but cannot produce it in one
-  forward pass. A better prompt will not fix this; pick a model that qualifies.
+- **Don't judge a thinking model on one token.** Some have no thinking-off mode (GLM-5.3: 66.7% on one
+  token, 97.5% when it thinks first), and some have one that answers worse than it thinks
+  (DeepSeek-V4.1-Flash: fails calibration on one token, 98.8% with ~60 thinking tokens). Set
+  `mode = "deliberate"` for those; `qualify` tries it automatically and tells you which mode passes.
 - **Don't ask Hunch to generate text,** do maths, compare dates, or reason in several steps. Find
   candidates in code and let a `pick` choose between them.
 - **Don't use multi-token labels.** Option keys and levels map to single tokens (letters and digits);

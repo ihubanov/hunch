@@ -14,6 +14,9 @@ can threshold, not a paragraph.
 - **No text generation.** Each check is a single constrained output token (`max_tokens: 1`), and the answer
   is read from the token logprobs and renormalised over the allowed labels. The model can't ramble, and a
   malformed answer can't make it into your code.
+- **Images too.** Send photos with the request and ask about them (*does this photo show flooding? does it show
+  the event in the headline?*) on any vision model your vLLM serves. Same checks, same probabilities, same gate:
+  three models qualify on a hand-labelled set of 188 look-alike photos (see [Images](#images)).
 - **Parallel by default.** All checks in a request run concurrently, with the context first in every prompt so the
   server's prefix cache is reused.
 - **Your models, your hardware.** Hunch runs against any [vLLM](https://github.com/vllm-project/vllm)
@@ -95,6 +98,7 @@ model qualifies, and `--json FILE` writes the full report. `--quick` does one na
 | --- | --- | --- |
 | `context` | string, object or array | The data to judge. Use an object with named fields when there are several parts, and refer to them in questions with backticks, e.g. `` `ticket.messages[0]` `` |
 | `checks` | object: id → check | Your own ids; results come back under the same ids |
+| `images` | list of strings, optional | Up to 8 images for a vision model: `https://…` URLs the backend can fetch, or `data:image/…;base64,…` URLs. They are part of the context, numbered `IMAGE 1`…`IMAGE n` so questions can refer to them. `context` may be omitted when only images are judged |
 | `model` | string, optional | One of the configured models; defaults to `service.default_model` |
 | `effort` | string, optional | Thinking effort for a `deliberate` model on this call only (`low` / `high` / `max`). Ignored by backends without it |
 
@@ -112,7 +116,7 @@ Errors come back as `{"error": {"code": "...", "message": "..."}}`:
 
 | HTTP | `code` | When |
 | --- | --- | --- |
-| 400 | `invalid_request`, `unknown_model`, `too_many_options`, `too_many_levels` | Bad input (unknown fields are rejected) |
+| 400 | `invalid_request`, `unknown_model`, `too_many_options`, `too_many_levels`, `too_many_images` | Bad input (unknown fields are rejected) |
 | 401 | `unauthorized` | `HUNCH_API_KEYS` is set and the bearer key is missing or wrong |
 | 413 | `context_too_long` | The context plus the question exceed the model's context window |
 | 502 | `backend_error` | The backend returned an error, or did **not** enforce the constraint (never turned into a made-up probability) |
@@ -149,8 +153,11 @@ import httpx
 
 HUNCH = "http://127.0.0.1:8791"
 
-def judge(context, checks, model=None):
-    r = httpx.post(f"{HUNCH}/v1/judge", json={"context": context, "checks": checks, "model": model}, timeout=60)
+def judge(context, checks, model=None, images=None):
+    body = {"context": context, "checks": checks, "model": model}
+    if images:
+        body["images"] = images     # vision models: http(s) or data: URLs, see Images below
+    r = httpx.post(f"{HUNCH}/v1/judge", json=body, timeout=60)
     r.raise_for_status()
     return r.json()["results"]
 
@@ -180,6 +187,50 @@ Patterns that work well:
   When your priorities change, you change a weight, not a prompt.
 - **Gate expensive work.** Use a cheap `yesno` ("does this passage answer the question at all?") before sending
   anything to a big generative model.
+
+## Images
+
+Hunch passes images through to the model as ordinary chat content parts, so any vision model on your vLLM server
+can answer checks about photos, and the answer is read off the logprobs exactly as for text:
+
+```python
+res = judge({"headline": "Floods hit the area"},
+            {"shows_it": {"kind": "yesno", "question": "Does the photo show the event described in the headline?",
+                          "yes_if": "the photo shows that kind of event",
+                          "no_if": "a similar-looking but different scene (e.g. a wet street for a flood), "
+                                   "or a real photo of a different kind of event"}},
+            images=["data:image/jpeg;base64,..."])
+```
+
+**Measured.** [`bench/images.py`](bench/images.py) runs 188 freely licensed Wikimedia Commons photos, labelled by
+hand, through eight questions a news or monitoring pipeline asks. Each question comes with its look-alike: a
+flooded street vs a wet one (and photos of London's *Flood Street*), a protest vs a concert crowd or a memorial, an
+active wildfire vs a red sunset or forest that has already burned, a road crash vs a traffic jam, a building on
+fire vs one lit red by fireworks or a fire station, earthquake rubble vs a demolition site, a polling station vs a
+queue, a press conference vs a lecture or TED talk. Scored with `qualify`'s criteria, NVFP4 checkpoints on vLLM,
+thinking off, one token per check:
+
+| Model | *"Does this photo show …?"* | AUROC | ECE | *"Does the photo show the event in the headline?"* | AUROC | ECE | Flips |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Gemma-4-31B-IT | ✅ **98.4%** | 1.000 | 0.016 | ✅ **98.2%** | 0.997 | 0.016 | 0% |
+| Qwen3.5-397B-A17B | ✅ 97.3% | 0.999 | **0.013** | 97.4%\* | 0.997 | 0.055 | 0% |
+| Qwen3.8-Flash-Next | ✅ 97.3% | 1.000 | 0.021 | 96.7%\* | 0.998 | 0.022 | 0–0.4% |
+
+Accuracy is at the `p_yes ≥ 0.9` gate over 188 photos (photo task) and 274 checks (headline task: every photo with
+its own event's headline, plus every real event photo with a clearly different event's headline, all of which the
+three models rejected). \* Passes accuracy, calibration and stability; flagged only by the strict rule that
+definitions must never lower accuracy, here by one check in 274.
+
+**What this shows:** the 0.9 gate carries over to images unchanged. Calibration on photos is as good as or better
+than on text, and the few remaining misses are photos the models hedge on (a tree standing in Mekong floodwater, a
+car hanging off a quay), which is what a gate should send to review.
+
+**Limits:** eight questions and 188 photos, chosen and labelled by us; well-known Commons photos may be in the
+models' training data; no stock-photo or AI-generated-image detection was tested. Two lessons from building it:
+auditing labels against the models' disagreements found one of ours wrong (a car-and-streetcar collision we had
+labelled "no crash"), and headlines that name details ("thousands march demanding new elections") make most real
+protest photos a correct *no*, so say in the check whether you mean the kind of event or this specific one.
+**Measure on your own images** before relying on it: `python bench/images.py` shows how.
 
 ## Choosing a model
 
