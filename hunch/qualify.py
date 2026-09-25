@@ -50,6 +50,7 @@ class Report:
     unavailable: bool = False   # backend down: no verdict either way
     mode: str = "one_token"     # how the answer was read: one_token / deliberate
     opens_scratchpad: bool | None = None   # the model's first token starts thinking, not answering
+    can_think: bool | None = None          # it thinks when thinking is not switched off
     reasons: list[str] = field(default_factory=list)
     accuracy: float | None = None
     accuracy_vague: float | None = None
@@ -135,6 +136,7 @@ async def qualify_model(engine: Engine, client: httpx.AsyncClient, name: str, se
 
     if r.mode == "one_token":
         r.opens_scratchpad = await engine.opens_scratchpad(spec)
+        r.can_think = r.opens_scratchpad or await engine.can_think(spec)
     named, vague = build(), build(vague=True)
     labels = [it["label"] for it in named]
     progress(f"   {r.model}: mode={r.mode}, named look-alikes, run 1/{1 if quick else 2} ...")
@@ -201,24 +203,31 @@ async def run(names: list[str], criteria: Criteria, quick: bool, json_path: str 
         except Exception as e:  # noqa: BLE001
             print(f"cannot reach the backend: {e}")
             return 2
+        passed = {}   # configured name -> qualified in some mode
         for name in names:
             report = await qualify_model(engine, client, name, served, headers, criteria, quick)
             print_report(report, criteria)
             reports.append(report)
-            # A model with no non-thinking mode can't be judged on its first token. Re-run it the way it
-            # can actually answer, and report both, so the trade-off is visible.
-            if report.opens_scratchpad and not report.qualified and not report.unavailable:
+            passed[name] = report.qualified
+            # A model that can think gets a second chance in deliberate mode, and both are reported so the
+            # trade-off is visible. Two reasons: it has no non-thinking mode at all (GLM-5.3), or it has
+            # one that answers worse than it thinks (DeepSeek-V4.1-Flash: ECE 0.19 -> 0.02).
+            if report.can_think and report.mode == "one_token" and not report.qualified and not report.unavailable:
                 spec = s.resolve(name)
-                print(f"\n   re-running {name} in deliberate mode (it thinks first; ~{spec.think_budget} tokens per check) ...")
+                why = "it thinks first" if report.opens_scratchpad else "it can think, and its one-token answers failed"
+                print(f"\n   re-running {name} in deliberate mode ({why}; up to {spec.think_budget} tokens per check) ...")
                 deliberate = await qualify_model(engine, client, name, served, headers, criteria, quick,
                                                  spec_override=replace(spec, mode="deliberate"),
                                                  label=f"{name} (deliberate)")
                 print_report(deliberate, criteria)
                 reports.append(deliberate)
+                if deliberate.qualified:
+                    print(f'   -> {name} qualifies with mode = "deliberate" in hunch.toml')
+                passed[name] = passed[name] or deliberate.qualified
     if json_path:
         with open(json_path, "w") as f:
             json.dump({"criteria": asdict(criteria), "reports": [asdict(r) for r in reports]}, f, indent=1)
-    ok = all(r.qualified for r in reports)
+    ok = all(passed.values())   # a model counts once it qualifies in some mode
     print(f"\n{'ALL QUALIFIED' if ok else 'NOT ALL QUALIFIED'}: "
           + ", ".join(f"{r.model}={'yes' if r.qualified else ('unavailable' if r.unavailable else 'no')}" for r in reports))
     return 0 if ok else 1

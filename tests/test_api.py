@@ -22,9 +22,10 @@ SETTINGS = Settings(
 )
 
 
-def fake_backend(prose=False, fail_first=0, status=504, scratchpad=False, think_tokens=0):
+def fake_backend(prose=False, fail_first=0, status=504, scratchpad=False, think_tokens=0, thinks_when_allowed=False):
     """scratchpad: the model's first unconstrained token opens a thinking block (no non-thinking mode).
-    think_tokens: in deliberate calls, emit this many thinking tokens before the verdict."""
+    think_tokens: in deliberate calls, emit this many thinking tokens before the verdict.
+    thinks_when_allowed: answers directly with thinking off, thinks otherwise (DeepSeek-style)."""
     state = {"fails": fail_first, "calls": 0, "bodies": [], "probes": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -39,6 +40,9 @@ def fake_backend(prose=False, fail_first=0, status=504, scratchpad=False, think_
             state["probes"] += 1
             # a model with no non-thinking mode leaks its scratchpad into content (vLLM #54744)
             content = "The user is asking me to reply with exactly one word" if scratchpad else "yes"
+            if thinks_when_allowed and body.get("reasoning_effort") != "none":
+                return httpx.Response(200, json={"choices": [{"message": {"content": "", "reasoning": "We need answer."}}],
+                                                 "usage": {"prompt_tokens": 10, "completion_tokens": 16}})
             return httpx.Response(200, json={"choices": [{"message": {"content": content}}],
                                              "usage": {"prompt_tokens": 10, "completion_tokens": 1}})
         state["bodies"].append(body)
@@ -533,3 +537,41 @@ def test_effort_is_configurable_per_model_and_per_request():
         bad = c.post("/v1/judge", json={"context": "x", "checks": {"q": {"kind": "yesno", "question": "x"}},
                                         "effort": "none"})
     assert bad.status_code == 400 and "switch thinking off" in bad.json()["error"]["message"]
+
+
+def test_detects_a_model_that_can_think_but_answers_directly():
+    import asyncio
+
+    async def go(**kw):
+        engine, state = _engine(**kw)
+        async with engine.client:
+            spec = SETTINGS.models["fast"]
+            return await engine.opens_scratchpad(spec), await engine.can_think(spec)
+
+    assert asyncio.run(go(thinks_when_allowed=True)) == (False, True)   # DeepSeek-V4.1-Flash
+    assert asyncio.run(go(scratchpad=True)) == (True, True)             # GLM-5.3
+    assert asyncio.run(go()) == (False, False)                          # plain instruct model
+
+
+def test_deliberate_drops_deepseek_style_thinking_switch():
+    from hunch.engine import effective_extra_body
+    spec = replace(SETTINGS.models["fast"], extra_body={"chat_template_kwargs": {"thinking": False, "x": 1}})
+    assert effective_extra_body(spec, deliberate=True) == {"chat_template_kwargs": {"x": 1}}
+    assert effective_extra_body(spec, deliberate=False) == spec.extra_body
+
+
+def test_qualify_reruns_a_thinking_capable_model_in_deliberate_mode(monkeypatch, tmp_path):
+    import asyncio
+    import functools
+    from hunch import qualify
+
+    transport, _ = fake_backend(thinks_when_allowed=True)
+    monkeypatch.setattr(qualify, "load_settings", lambda: replace(SETTINGS, models={"fast": SETTINGS.models["fast"]}))
+    monkeypatch.setattr(qualify.httpx, "AsyncClient", functools.partial(httpx.AsyncClient, transport=transport))
+    out = tmp_path / "q.json"
+    code = asyncio.run(qualify.run([], qualify.Criteria(), quick=True, json_path=str(out)))
+    reports = json.loads(out.read_text())["reports"]
+    assert [r["model"] for r in reports] == ["fast", "fast (deliberate)"]
+    assert reports[0]["can_think"] is True and reports[0]["opens_scratchpad"] is False
+    assert reports[1]["mode"] == "deliberate"
+    assert code == 1   # the fake answers "no" to everything, so neither mode qualifies

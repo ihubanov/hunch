@@ -36,8 +36,9 @@ def effective_extra_body(spec: ModelSpec, deliberate: bool) -> dict:
     if str(extra.get("reasoning_effort", "")).lower() in THINKING_OFF_EFFORTS:
         extra.pop("reasoning_effort")
     kwargs = extra.get("chat_template_kwargs")
-    if isinstance(kwargs, dict) and kwargs.get("enable_thinking") is False:
-        kwargs = {k: v for k, v in kwargs.items() if k != "enable_thinking"}
+    # Qwen-style templates read `enable_thinking`, DeepSeek-style ones read `thinking`
+    if isinstance(kwargs, dict) and any(kwargs.get(k) is False for k in ("enable_thinking", "thinking")):
+        kwargs = {k: v for k, v in kwargs.items() if not (k in ("enable_thinking", "thinking") and v is False)}
         if kwargs:
             extra["chat_template_kwargs"] = kwargs
         else:
@@ -167,9 +168,21 @@ class Engine:
 
         A single token is not enough to tell: GLM returns just "The" there, which looks like an answer.
         """
+        return await self._starts_thinking(spec, spec.extra_body)
+
+    async def can_think(self, spec: ModelSpec) -> bool:
+        """True when the model thinks once the switches that turn thinking off are dropped.
+
+        Different from opens_scratchpad: DeepSeek-V4.1-Flash has a real non-thinking mode and answers
+        in one token, but those answers follow the listed order of the options (ECE 0.19 with debias).
+        Allowed to think, it qualifies with ECE 0.02. qualify uses this to try deliberate mode too.
+        """
+        return await self._starts_thinking(spec, effective_extra_body(spec, deliberate=True))
+
+    async def _starts_thinking(self, spec: ModelSpec, extra: dict) -> bool:
         body = {"model": spec.backend_model,
                 "messages": [{"role": "user", "content": "Reply with exactly one word: yes"}],
-                "max_tokens": PROBE_MAX_TOKENS, "temperature": 0, **spec.extra_body}
+                "max_tokens": PROBE_MAX_TOKENS, "temperature": 0, **extra}
         headers = {"Authorization": f"Bearer {self.s.backend_api_key}"} if self.s.backend_api_key else {}
         try:
             async with self.sem:

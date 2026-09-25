@@ -200,7 +200,13 @@ From the bundled benchmark (see [Measured](#measured)):
   probabilities are the most trustworthy as probabilities, and it's light enough to run next to other workloads.
 - **Edge:** a small MoE (Qwen3.6-35B-A3B, 4-bit: 99.6%). It fits on edge hardware and
   suits requests that ask only a few checks.
-- **Position-biased models** (DeepSeek-V4-Flash here) work with `debias = true`, at twice the calls.
+- **A thinking-off mode is not automatically a good one.** DeepSeek-V4.1-Flash answers in one token, but those answers
+  follow the order the options are listed in, and even with `debias = true` its calibration fails (ECE 0.192).
+  Allowed to think for ~60 tokens (`mode = "deliberate"`, `effort = "low"`) it qualifies at 98.8% with ECE 0.013, tied
+  with Gemma as the best calibrated model we have measured. See
+  [Models whose thinking-off mode is weaker](#models-whose-thinking-off-mode-is-weaker).
+- **Position-biased models** work with `debias = true`, at twice the calls. It reduces the bias by averaging it; it
+  does not remove it.
 - **Check the model has a real non-thinking mode.** GLM-5.3 has none: its template always opens a thinking block, so
   its first token is never an answer. Run it with `mode = "deliberate"` and it qualifies at 97.5% (ECE 0.025); leave
   it in one-token mode and it scores 66.7% (see [Models with no non-thinking mode](#models-with-no-non-thinking-mode)). Run `python -m hunch selftest` and `python bench/bench.py accuracy <model>` before adopting a model.
@@ -251,7 +257,8 @@ value, or is about a different thing"*). Results on vLLM (NVFP4 checkpoints unle
 | Qwen3.8-27B (bf16) | ✅ Qualified | 99.6 | 1.000 | 0.030 | 0.058 | – (0 flips) |
 | Qwen3.6-35B-A3B (AWQ int4) | ✅ Qualified* | 99.6 | 1.000 | 0.055 | 0.116 | 0.263 |
 | Gemma-4-31B-IT | ✅ Qualified | 98.8 | 0.991 | **0.013** | **0.013** | **0.011** |
-| DeepSeek-V4-Flash (debias on) | ❌ Not qualified | 96.2 | 0.996 | 0.118 | 0.179 | 0.369 |
+| DeepSeek-V4.1-Flash (`mode = "deliberate"`, `effort = "low"`) | ✅ Qualified | 98.8 | 0.991 | **0.013** | **0.013** | – (1.2% flips) |
+| DeepSeek-V4.1-Flash (one token, debias on) | ❌ Not qualified | 92.9 | 0.994 | 0.133 | 0.192 | – (1.2% flips) |
 | Qwen3.5-9B (bf16) | ❌ Not qualified | 90.8 | 0.996 | 0.192 | 0.266 | – (0 flips) |
 | Qwen3-8B (bf16) | ❌ Not qualified | 76.7 | 0.838 | 0.238 | 0.242 | 0.169 |
 | Qwen3-14B (bf16) | ❌ Not qualified | 71.7 | 0.806 | 0.286 | 0.289 | 0.195 |
@@ -260,12 +267,14 @@ value, or is about a different thing"*). Results on vLLM (NVFP4 checkpoints unle
 | Qwen3-0.6B (bf16) | ❌ Not qualified | 35.8 | 0.758 | 0.611 | 0.630 | 0.024 |
 
 Verdicts use `python -m hunch qualify`'s default criteria (accuracy ≥ 90%, ECE ≤ 0.15, definitions must not hurt,
-≤ 2% flips). Qwen3.5-397B, Qwen3.8-27B, Gemma-4-31B and Qwen3.5-9B were run through `qualify` itself; for the others the
+≤ 2% flips). Qwen3.5-397B, Qwen3.8-27B, Gemma-4-31B, Qwen3.5-9B, GLM-5.3 and DeepSeek-V4.1-Flash were run through `qualify` itself; for the others the
 same criteria are applied to their benchmark numbers. \* Qwen3.6-35B-A3B passes on accuracy, calibration and stability;
 its question-only run wasn't measured.
 
 Why the others fail:
-- **DeepSeek-V4-Flash:** calibration.
+- **DeepSeek-V4.1-Flash in one-token mode:** calibration. Its thinking-off answers lean on the listed order of the
+  answers; allowed to think, the same model qualifies. See
+  [Models whose thinking-off mode is weaker](#models-whose-thinking-off-mode-is-weaker).
 - **Qwen3.5-9B:** calibration. Real positives sit at p≈0.99, but the look-alike traps land at a median of 0.42–0.65, so
   it hedges rather than being confidently wrong.
 - **The Qwen3 generation:** confidently wrong, and definitions make it *worse*.
@@ -285,7 +294,8 @@ which until v1.2.1 recorded only accuracy for its question-only run; those backe
 | Qwen3.8-27B | ✅ Qualified | 99.6 | **80.0** | – | – |
 | GLM-5.3 (`mode = "deliberate"`) | ✅ Qualified | 97.5 | **81.2** | – | – |
 | Gemma-4-31B-IT | ✅ Qualified | 98.8 | **80.4** | 0.863 | 0.196 |
-| DeepSeek-V4-Flash (debias on) | ❌ Not qualified | 96.2 | **72.1** | 0.932 | 0.329 |
+| DeepSeek-V4.1-Flash (`mode = "deliberate"`, `effort = "low"`) | ✅ Qualified | 98.8 | **83.3** | 0.875 | 0.167 |
+| DeepSeek-V4.1-Flash (one token, debias on) | ❌ Not qualified | 92.9 | **78.3** | 0.865 | 0.241 |
 | Qwen3.5-9B | ❌ Not qualified | 90.8 | **81.7** | – | – |
 | Qwen3-8B | ❌ Not qualified | 76.7 | **81.2** (definitions hurt) | – | – |
 | Qwen3-14B | ❌ Not qualified | 71.7 | **74.6** (definitions hurt) | – | – |
@@ -333,6 +343,29 @@ one token in well under a second — and with a 512-token budget a few checks ne
 - **A reasoning model can still give you a calibrated probability.** Let it think, constrain the final answer to your
   labels, and read the logprobs of that token. That is what [`mode = "deliberate"`](#deliberate-mode) does.
 
+### Models whose thinking-off mode is weaker
+
+DeepSeek-V4.1-Flash is the opposite case to GLM. It *does* have a working non-thinking mode: with
+`reasoning_effort: "none"` its first token is a clean `Y` or `N`. But that snap answer is not the model's best
+judgment:
+
+| How DeepSeek-V4.1-Flash is asked | Accuracy | AUROC | ECE | Flips | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| One token | 82.9% | 0.968 | 0.225 | 2.5% | ❌ |
+| One token, `debias = true` | 92.9% | 0.994 | 0.192 | 1.2% | ❌ calibration |
+| `mode = "deliberate"`, default effort | 97.9% | 0.984 | 0.021 | 0.8% | ✅ |
+| `mode = "deliberate"`, `effort = "low"` | **98.8%** | **0.991** | **0.013** | 1.2% | ✅ |
+
+Every error in one-token mode was a false *yes*, and most were the restatement trap, answered with confidence:
+asked whether "Port 5432 is where the staging Postgres accepts connections" *replaces* "The staging Postgres listens on
+port 5432", it said yes at 0.99 when `Y` was listed first, and mostly no when `N` was. `debias` averages the two
+orders, which dilutes that bias into hedged probabilities but cannot remove it — hence good ranking (AUROC 0.994) and
+failed calibration. Allowed to think, it gets the same pair right in both orders, spending ~60 thinking tokens (about a
+second per check on our deployment), and `low` effort is enough.
+
+**What to take from this:** when a model can think, its thinking-off answers may be the weaker of the two, and
+`debias` can hide that rather than fix it. `python -m hunch qualify` now tries both (see below).
+
 ### Deliberate mode
 
 For exactly these models, Hunch can read the answer differently. Set `mode` on the model in `hunch.toml`:
@@ -345,7 +378,7 @@ For exactly these models, Hunch can read the answer differently. Set `mode` on t
 
 Everything downstream is identical — same API, same `probs` and `confidence`, same thresholds, same `qualify`
 criteria. In `deliberate` mode Hunch drops the fields that switch thinking *off* (`reasoning_effort: "none"`,
-`enable_thinking: false`) but keeps real effort levels.
+`enable_thinking: false`, `thinking: false`) but keeps real effort levels.
 
 **How long it thinks: `effort`.** On backends that support it (GLM-style `reasoning_effort`), set `effort` per model
 in `hunch.toml`, or per request for one call. More thinking buys stability, and the curve is steep at the cheap end —
@@ -366,9 +399,10 @@ effort: median 128 thinking tokens, p95 671, max 3579, so a 512 cap truncated 3%
 tail collapses (`low` max 59, `high` max 138) and 256 is plenty. Size it above your p99 and control cost with
 `effort`.
 
-`python -m hunch qualify` detects this situation by itself: if a model fails in one-token mode **and** its first
-token opens a scratchpad, it says so, re-runs the model in `deliberate` mode, and reports both, so the trade-off is
-visible rather than hidden behind a bad score.
+`python -m hunch qualify` handles both situations by itself. If a model fails in one-token mode **and** it can think —
+either because its first token always opens a scratchpad (GLM) or because it thinks once thinking isn't switched off
+(DeepSeek) — it re-runs the model in `deliberate` mode, reports both, and tells you which setting qualifies. A model
+counts as qualified if either mode passes.
 
 ## Writing good checks
 
@@ -401,8 +435,9 @@ max_concurrency = 16        # simultaneous backend calls
 backend_model = "Qwen/Qwen3.5-397B-A17B"
 
 [models.deepseek]
-backend_model = "deepseek-ai/DeepSeek-V4-Flash"
-debias = true
+backend_model = "deepseek-ai/DeepSeek-V4.1-Flash"
+mode = "deliberate"         # its thinking-off answers are position-biased; thinking briefly fixes that
+effort = "low"
 ```
 
 | Environment variable | Meaning |

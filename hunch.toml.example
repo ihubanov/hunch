@@ -20,7 +20,7 @@ description = "Most accurate in the bundled benchmark"
 # mode = "deliberate"  # the model thinks first; only its final verdict token is constrained. For models
 #                      # with no non-thinking mode. Costs think_budget tokens and seconds per check.
 # mode = "auto"        # probe the backend once at first use and pick
-# think_budget = 512   # max thinking tokens in deliberate mode
+# think_budget = 2048  # cap on thinking tokens in deliberate mode (a cap, not a knob)
 # effort = "high"      # GLM-style reasoning_effort: how long it may think. More thinking = stabler
 #                      # answers (GLM on our benchmark: low 94.2% / 4.6% flips, high 96.7% / 2.5%,
 #                      # default 97.5% / 0.8%). Per request too: {"effort": "low"} on /v1/judge.
@@ -30,9 +30,11 @@ backend_model = "google/gemma-4-31b-it"
 description = "Smaller, best calibrated"
 
 [models.deepseek]
-backend_model = "deepseek-ai/DeepSeek-V4-Flash"
-description = "Favours the first-listed answer, so ask both orders"
-debias = true
+backend_model = "deepseek-ai/DeepSeek-V4.1-Flash"
+description = "Thinks briefly first: its one-token answers favour the first-listed answer"
+mode = "deliberate"
+effort = "low"
+# debias = true        # for a model that has no thinking mode: ask both answer orders and average (2x calls)
 
 # Per-model extra request fields (default: {"reasoning_effort": "none"}), e.g. for chat templates:
 # [models.qwen.extra_body]
