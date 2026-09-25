@@ -84,7 +84,10 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
             if req.effort.lower() in THINKING_OFF_EFFORTS:
                 raise HunchError(400, "invalid_request",
                                  f"effort {req.effort!r} would switch thinking off; use mode=one_token instead")
-            spec = replace(spec, extra_body={**spec.extra_body, "reasoning_effort": req.effort})
+            # effort only means something to a model that thinks; on a one_token model it would switch
+            # thinking on and break the one-token answer, so it is ignored there (as documented)
+            if await engine.mode_for(spec) == "deliberate":
+                spec = replace(spec, extra_body={**spec.extra_body, "reasoning_effort": req.effort})
         checks = validate_checks(req.checks, engine.max_options)
         validate_images(req.images)
         t0 = time.perf_counter()

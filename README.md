@@ -106,7 +106,7 @@ model qualifies, and `--json FILE` writes the full report. `--quick` does one na
 | `checks` | object: id → check | Your own ids; results come back under the same ids |
 | `images` | list of strings, optional | Up to 8 images for a vision model: `https://…` URLs the backend can fetch, or `data:image/…;base64,…` URLs. They are part of the context, numbered `IMAGE 1`…`IMAGE n` so questions can refer to them. `context` may be omitted when only images are judged |
 | `model` | string, optional | One of the configured models; defaults to `service.default_model` |
-| `effort` | string, optional | Thinking effort for a `deliberate` model on this call only (`low` / `high` / `max`). Ignored by backends without it |
+| `effort` | string, optional | Thinking effort for a `deliberate` model on this call only (`low` / `high` / `max`). Ignored for `one_token` models (it would switch thinking on) and by backends without it. In `hunch.toml`, `effort` requires `mode = "deliberate"` or `"auto"` |
 
 Check kinds:
 

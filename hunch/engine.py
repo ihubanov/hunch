@@ -225,7 +225,15 @@ class Engine:
             raise HunchError(502, "backend_error", "backend returned no logprobs")
         chosen = str(tok.get("token", "")).strip()
         if chosen not in allowed:
-            # The constraint did not reach the model: fail loudly, never derive a probability from an unrelated token.
+            # Never derive a probability from an unrelated token. Say WHY: a thinking model in one_token mode
+            # spends its one token opening the reasoning (it lands in `reasoning`), which is a config problem,
+            # not a backend that ignores the constraint.
+            msg = (data.get("choices") or [{}])[0].get("message") or {}
+            if (msg.get("reasoning") or msg.get("reasoning_content") or "").strip():
+                raise HunchError(502, "backend_error",
+                                 f"the model is thinking in one_token mode (its one token {chosen!r} opened its reasoning): "
+                                 "switch thinking off for this model (reasoning_effort \"none\", or its chat template's "
+                                 "thinking flag in extra_body), or set mode = \"deliberate\"")
             raise HunchError(502, "backend_error",
                              f"backend answered {chosen!r}, not one of {list(labels)}; it does not enforce structured_outputs")
         probs = {lab: 0.0 for lab in labels}

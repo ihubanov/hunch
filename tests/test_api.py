@@ -685,3 +685,38 @@ def test_selftest_probes_an_auto_model_in_its_resolved_mode(monkeypatch, capsys)
     out = capsys.readouterr().out
     assert "NOT enforced" not in out and "structured_outputs enforced" in out
     assert state["bodies"][0]["max_tokens"] > 16   # the probe got a thinking budget, not a one-token cap
+
+
+
+def test_thinking_in_one_token_mode_gets_a_clear_error():
+    def handler(request):
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "org/fast-model"}]})
+        tok = {"token": "We", "logprob": 0.0, "top_logprobs": [{"token": "We", "logprob": 0.0}]}
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "reasoning": "We"},
+                                                      "logprobs": {"content": [tok]}, "finish_reason": "length"}]})
+    c = TestClient(create_app(SETTINGS, transport=httpx.MockTransport(handler)))
+    with c:
+        r = judge(c, {"q": {"kind": "yesno", "question": "wet?"}})
+    assert r.status_code == 502
+    assert "thinking in one_token mode" in r.json()["error"]["message"]
+    assert "does not enforce" not in r.json()["error"]["message"]
+
+
+def test_effort_with_one_token_mode_is_a_config_error(tmp_path):
+    from hunch.config import load_settings
+    f = tmp_path / "h.toml"
+    f.write_text('[backend]\nurl = "http://b"\n[models.m]\nbackend_model = "x"\neffort = "low"\n')
+    with pytest.raises(ValueError, match="needs thinking"):
+        load_settings(f)
+    f.write_text('[backend]\nurl = "http://b"\n[models.m]\nbackend_model = "x"\nmode = "auto"\neffort = "low"\n')
+    assert load_settings(f).models["m"].extra_body["reasoning_effort"] == "low"
+
+
+def test_per_request_effort_is_ignored_on_a_one_token_model():
+    c, state = client()
+    with c:
+        r = c.post("/v1/judge", json={"context": "x", "checks": {"q": {"kind": "yesno", "question": "yes-please?"}},
+                                      "effort": "low"})
+    assert r.status_code == 200, r.text
+    assert state["bodies"][-1]["reasoning_effort"] == "none"   # thinking stays off

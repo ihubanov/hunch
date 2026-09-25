@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hunch"
-version = "1.5.2"
+version = "1.5.3"
 description = "Calibrated yes/no, pick-one and scale judgments from your own LLMs, read straight off the logprobs"
 readme = "README.md"
 license = "MIT"

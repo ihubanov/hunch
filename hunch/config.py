@@ -67,6 +67,11 @@ def load_settings(path: str | os.PathLike | None = None) -> Settings:
 
     models = {name: ModelSpec(name=name, **spec) for name, spec in raw.get("models", {}).items()}
     # `effort` is sugar for extra_body.reasoning_effort, so one place decides what is sent
+    for n, m in models.items():
+        if m.effort and m.mode == "one_token":
+            # effort turns thinking ON, and a one_token model must answer in its first token
+            raise ValueError(f"model {n!r}: effort={m.effort!r} needs thinking, but mode is one_token; "
+                             "set mode = \"deliberate\" (or \"auto\"), or remove effort")
     models = {n: (replace(m, extra_body={**m.extra_body, "reasoning_effort": m.effort}) if m.effort else m)
               for n, m in models.items()}
     if not models and os.environ.get("HUNCH_BACKEND_MODEL"):
