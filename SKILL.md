@@ -90,7 +90,7 @@ python -m hunch qualify <model>   # ~1 minute: verdict with reasons, on 240 labe
 look-alikes does not make the model *worse*, and stability between identical runs. Models that pass on
 the bundled benchmark include Qwen3.5-397B, Qwen3.8-27B, Qwen3.6-35B-A3B, Gemma-4-31B, and GLM-5.3 and
 DeepSeek-V4.1-Flash in deliberate mode. For images, `python bench/images.py` runs the same criteria on
-188 labelled look-alike photos; Gemma-4-31B, Qwen3.5-397B and Qwen3.8-Flash-Next pass.
+188 labelled look-alike photos; Gemma-4-31B, Qwen3.5-397B, Qwen3.8-Flash-Next and 4-bit Qwen3.6-35B-A3B pass.
 
 ## What not to do
 

@@ -11,7 +11,7 @@ can threshold, not a paragraph.
 It works on photos too. *Does this photo show flooding? Does it show the event in the headline? Is this a protest or
 a concert crowd?* Send the image with the check and get a probability you can gate at 0.9, the same as for text. On
 188 hand-labelled look-alike photos (a flooded street vs a wet one, earthquake rubble vs a demolition site, a building
-on fire vs one lit by fireworks), three vision models qualify, with Gemma-4-31B at **98.4%** and calibration error
+on fire vs one lit by fireworks), four vision models qualify, one of them a 4-bit 35B MoE on an edge-class GPU, with Gemma-4-31B at **98.4%** and calibration error
 0.016. See [Images](#images).
 
 - **Typed checks:** `yesno` → `p_yes`, `pick` (one of up to 300 options) → the best option and a full
@@ -22,7 +22,7 @@ on fire vs one lit by fireworks), three vision models qualify, with Gemma-4-31B 
   malformed answer can't make it into your code.
 - **Images too.** Send photos with the request and ask about them (*does this photo show flooding? does it show
   the event in the headline?*) on any vision model your vLLM serves. Same checks, same probabilities, same gate:
-  three models qualify on a hand-labelled set of 188 look-alike photos (see [Images](#images)).
+  four models qualify on a hand-labelled set of 188 look-alike photos (see [Images](#images)).
 - **Parallel by default.** All checks in a request run concurrently, with the context first in every prompt so the
   server's prefix cache is reused.
 - **Your models, your hardware.** Hunch runs against any [vLLM](https://github.com/vllm-project/vllm)
@@ -222,6 +222,7 @@ thinking off, one token per check:
 | Gemma-4-31B-IT | ✅ **98.4%** | 1.000 | 0.016 | ✅ **98.2%** | 0.997 | 0.016 | 0% |
 | Qwen3.5-397B-A17B | ✅ 97.3% | 0.999 | **0.013** | ✅ 97.4% | 0.997 | 0.055 | 0% |
 | Qwen3.8-Flash-Next | ✅ 97.3% | 1.000 | 0.021 | ✅ 96.7% | 0.998 | 0.022 | 0–0.4% |
+| Qwen3.6-35B-A3B (AWQ int4, edge-class GPU) | ✅ 97.9% | 1.000 | 0.072 | ✅ **98.2%** | 0.999 | 0.085 | 0–0.4% |
 
 Accuracy is at the `p_yes ≥ 0.9` gate over 188 photos (photo task) and 274 checks (headline task: every photo with
 its own event's headline, plus every real event photo with a clearly different event's headline, all of which the
