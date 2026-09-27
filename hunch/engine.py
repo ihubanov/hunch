@@ -354,6 +354,19 @@ async def apply_effort(engine: "Engine", spec: ModelSpec, effort: str | None) ->
     return spec
 
 
+async def run_info(engine: "Engine", spec: ModelSpec, requested_effort: str | None) -> dict:
+    """How a call actually ran, for the response: the resolved mode, the thinking effort really sent (None in
+    one_token mode, where thinking is off), and a note whenever a requested effort was not applied, so a
+    caller never mistakes an ignored effort for an applied one."""
+    mode = await engine.mode_for(spec)
+    sent = effective_extra_body(spec, mode == "deliberate").get("reasoning_effort") if mode == "deliberate" else None
+    info: dict = {"mode": mode, "effort": sent}
+    if requested_effort is not None and sent != requested_effort:
+        info["notes"] = [f"effort {requested_effort!r} not applied: model {spec.name!r} runs {mode}, with thinking off; "
+                         "set mode = \"deliberate\" (HUNCH_MODE=deliberate) to let it think"]
+    return info
+
+
 def validate_checks(checks: dict[str, Any], max_options: int) -> dict[str, dict]:
     if not checks:
         raise HunchError(400, "invalid_request", "`checks` must contain at least one check")

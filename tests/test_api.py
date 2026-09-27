@@ -877,3 +877,21 @@ def test_importing_hunch_does_not_load_the_web_server():
     code = "import sys, hunch; hunch.judge; print('fastapi' in sys.modules, 'uvicorn' in sys.modules)"
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout.strip()
     assert out == "False False"
+
+
+
+def test_response_reports_mode_and_effort_actually_applied():
+    settings = replace(SETTINGS, models={"fast": SETTINGS.models["fast"],
+                                         "think": replace(SETTINGS.models["fast"], name="think", mode="deliberate")})
+    checks = {"q": {"kind": "yesno", "question": "yes-please?"}}
+    c, _ = client(settings)
+    with c:
+        plain = c.post("/v1/judge", json={"context": "x", "checks": checks}).json()
+        ignored = c.post("/v1/judge", json={"context": "x", "checks": checks, "effort": "high"}).json()
+    c, _ = client(settings, think_tokens=2)            # a thinking backend for the deliberate model
+    with c:
+        applied = c.post("/v1/judge", json={"context": "x", "checks": checks, "effort": "high", "model": "think"}).json()
+    assert (plain["mode"], plain["effort"], "notes" in plain) == ("one_token", None, False)
+    assert (ignored["mode"], ignored["effort"]) == ("one_token", None)
+    assert "not applied" in ignored["notes"][0]                        # never silently dropped
+    assert (applied["mode"], applied["effort"], "notes" in applied) == ("deliberate", "high", False)

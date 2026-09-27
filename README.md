@@ -192,8 +192,12 @@ agent's own variables. The first one set wins:
 | Model | `HUNCH_BACKEND_MODEL`, `ANTHROPIC_MODEL`, `OPENAI_MODEL`, `LLM_MODEL`; if none is set and the endpoint serves one model, that one |
 
 - **Mode is `auto`:** one probe per model (remembered for the process) decides between one token and
-  [deliberate](#deliberate-mode), so thinking models work without a setting. Override with `HUNCH_MODE`, or set
-  `HUNCH_EFFORT` for thinking models.
+  [deliberate](#deliberate-mode). It catches models with *no* thinking-off mode (GLM-5.3), but not models whose
+  thinking-off answers are merely worse: DeepSeek-V4.1-Flash probes as one-token and fails `qualify` that way. For
+  those, set `HUNCH_MODE=deliberate` (and `HUNCH_EFFORT=low`); `qualify` tells you which models need it.
+- **Every response says how it ran:** `mode` (resolved) and `effort` (the thinking effort actually sent, `null` in
+  one-token mode). A requested `effort` that was not applied adds a `notes` entry instead of being dropped silently.
+  This is the only change to the HTTP response since v1.5: two added fields, and `notes` when relevant.
 - **The main model, not the small one.** `ANTHROPIC_SMALL_FAST_MODEL` is deliberately not read. Run
   `python -m hunch qualify` on whatever you point it at.
 - **It needs token logprobs.** The endpoint has to be an OpenAI-compatible vLLM server (a gateway in front of one is

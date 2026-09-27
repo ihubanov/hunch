@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict
 from . import __version__
 from .config import Settings, load_settings
 
-from .engine import THINKING_OFF_EFFORTS, Engine, HunchError, apply_effort, validate_checks, validate_images
+from .engine import THINKING_OFF_EFFORTS, Engine, HunchError, apply_effort, run_info, validate_checks, validate_images
 
 
 class JudgeRequest(BaseModel):
@@ -74,7 +74,8 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
         return {"model": spec.name, "results": results,
                 "usage": {"prompt_tokens": usage.prompt_tokens, "completion_tokens": usage.completion_tokens,
                           "backend_calls": usage.backend_calls},
-                "latency_ms": round((time.perf_counter() - t0) * 1000)}
+                "latency_ms": round((time.perf_counter() - t0) * 1000),
+                **await run_info(engine, spec, req.effort)}
 
     @app.get("/v1/models", dependencies=[Depends(auth)])
     async def models(request: Request):

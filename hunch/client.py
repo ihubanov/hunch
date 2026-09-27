@@ -31,7 +31,7 @@ from typing import Any
 import httpx
 
 from .config import DiscoveryError, ModelSpec, Settings, discover_settings, load_settings
-from .engine import Engine, HunchError, apply_effort, validate_checks, validate_images
+from .engine import Engine, HunchError, apply_effort, run_info, validate_checks, validate_images
 
 _MODES: dict[tuple[str, str], dict[str, str]] = {}   # (endpoint, backend model) -> auto-mode answer, per process
 
@@ -70,9 +70,10 @@ async def ajudge(context: Any = "", checks: dict[str, Any] | None = None, *, ima
         checks = validate_checks(checks, engine.max_options)
         spec = await apply_effort(engine, spec, effort)
         results, usage = await engine.judge(spec, context, checks, images)
+        info = await run_info(engine, spec, effort)
     return {"model": spec.backend_model, "results": results,
             "usage": {"prompt_tokens": usage.prompt_tokens, "completion_tokens": usage.completion_tokens,
-                      "backend_calls": usage.backend_calls}}
+                      "backend_calls": usage.backend_calls}, **info}
 
 
 def judge(context: Any = "", checks: dict[str, Any] | None = None, **kwargs: Any) -> dict:
