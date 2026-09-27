@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
@@ -327,6 +327,31 @@ class Engine:
             results[cid] = result
             usage.add(used)
         return results, usage
+
+
+MAX_IMAGES = 8
+
+
+def validate_images(images: list[str] | None) -> None:
+    if not images:
+        return
+    if len(images) > MAX_IMAGES:
+        raise HunchError(400, "too_many_images", f"at most {MAX_IMAGES} images per request, got {len(images)}")
+    for i, url in enumerate(images, 1):
+        if not isinstance(url, str) or not url.startswith(("http://", "https://", "data:image/")):
+            raise HunchError(400, "invalid_request", f"image {i} must be an http(s) URL or a data:image/... URL")
+
+
+async def apply_effort(engine: "Engine", spec: ModelSpec, effort: str | None) -> ModelSpec:
+    """A per-call thinking effort. Off-values are refused; on a one_token model it is ignored, because it
+    would switch thinking on and break the one-token answer."""
+    if effort is None:
+        return spec
+    if effort.lower() in THINKING_OFF_EFFORTS:
+        raise HunchError(400, "invalid_request", f"effort {effort!r} would switch thinking off; use mode=one_token instead")
+    if await engine.mode_for(spec) == "deliberate":
+        return replace(spec, extra_body={**spec.extra_body, "reasoning_effort": effort})
+    return spec
 
 
 def validate_checks(checks: dict[str, Any], max_options: int) -> dict[str, dict]:

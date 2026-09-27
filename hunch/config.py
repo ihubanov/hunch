@@ -86,8 +86,10 @@ def load_settings(path: str | os.PathLike | None = None) -> Settings:
     group_size = int(svc.get("group_size", 15))
     max_top = int(backend.get("max_top_logprobs", 20))
     return Settings(
-        backend_url=os.environ.get("HUNCH_BACKEND_URL", backend.get("url", "http://localhost:8000")).rstrip("/"),
-        backend_api_key=os.environ.get("HUNCH_BACKEND_KEY", backend.get("api_key")),
+        # HUNCH_BACKEND_* > hunch.toml > the agent's own LLM variables > localhost
+        backend_url=api_root(os.environ.get("HUNCH_BACKEND_URL") or backend.get("url")
+                             or _first(URL_VARS) or "http://localhost:8000"),
+        backend_api_key=os.environ.get("HUNCH_BACKEND_KEY") or backend.get("api_key") or _first(KEY_VARS),
         models=models,
         default_model=default_model,
         max_concurrency=int(os.environ.get("HUNCH_CONCURRENCY", svc.get("max_concurrency", 16))),
@@ -97,3 +99,71 @@ def load_settings(path: str | os.PathLike | None = None) -> Settings:
         max_top_logprobs=max_top,
         api_keys=frozenset(k.strip() for k in keys.split(",") if k.strip()),
     )
+
+
+# ---------------------------------------------------------------- zero-config: the agent's own LLM settings
+# First set variable wins. ANTHROPIC_* are what Claude Code (and forks pointed at a local gateway) use for
+# their own LLM; ANTHROPIC_MODEL is the main model, never the small/fast one, which on our benchmark opened
+# a scratchpad instead of answering.
+URL_VARS = ("HUNCH_BACKEND_URL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "OPENAI_API_BASE", "LLM_BASE_URL")
+KEY_VARS = ("HUNCH_BACKEND_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "LLM_API_KEY")
+MODEL_VARS = ("HUNCH_BACKEND_MODEL", "ANTHROPIC_MODEL", "OPENAI_MODEL", "LLM_MODEL")
+# Hosted APIs that give no token logprobs under a constrained choice: Hunch cannot read an answer there.
+NO_LOGPROBS_HOSTS = ("api.anthropic.com",)
+
+
+class DiscoveryError(ValueError):
+    pass
+
+
+def _first(names: tuple[str, ...]) -> str | None:
+    return next((os.environ[n] for n in names if os.environ.get(n)), None)
+
+
+def api_root(url: str) -> str:
+    """OpenAI/Anthropic clients are often configured with .../v1; Hunch appends /v1/... itself."""
+    url = url.rstrip("/")
+    return url[:-3] if url.endswith("/v1") else url
+
+
+def served_models(url: str, key: str | None, timeout: float = 15.0) -> list[str]:
+    import httpx
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    r = httpx.get(f"{url}/v1/models", headers=headers, timeout=timeout)
+    r.raise_for_status()
+    return [m["id"] for m in r.json().get("data", [])]
+
+
+def discover_settings(base_url: str | None = None, api_key: str | None = None,
+                      model: str | None = None) -> Settings:
+    """Settings from the caller's own LLM configuration, for use without a hunch.toml.
+
+    A missing key is normal (local gateways often take none). With no model named anywhere, the
+    endpoint's only served model is used; several served models is an error that lists them.
+    mode is "auto": one probe per model decides one-token or deliberate.
+    """
+    url = base_url or _first(URL_VARS)
+    if not url:
+        raise DiscoveryError("no LLM endpoint: set HUNCH_BACKEND_URL (or ANTHROPIC_BASE_URL / OPENAI_BASE_URL)")
+    url = api_root(url)
+    if any(h in url for h in NO_LOGPROBS_HOSTS):
+        raise DiscoveryError(f"{url} returns no token logprobs, which Hunch reads its answers from; "
+                             "point HUNCH_BACKEND_URL at an OpenAI-compatible vLLM server instead")
+    key = api_key if api_key is not None else _first(KEY_VARS)
+    backend_model = model or _first(MODEL_VARS)
+    if not backend_model:
+        try:
+            served = served_models(url, key)
+        except Exception as e:  # noqa: BLE001
+            raise DiscoveryError(f"cannot list models at {url}: {e}") from e
+        if len(served) != 1:
+            raise DiscoveryError(f"{url} serves {len(served)} models; set HUNCH_BACKEND_MODEL "
+                                 f"(or ANTHROPIC_MODEL / OPENAI_MODEL) to one of {served}")
+        backend_model = served[0]
+    effort = os.environ.get("HUNCH_EFFORT")
+    spec = ModelSpec(name=os.environ.get("HUNCH_MODEL_NAME", "default"), backend_model=backend_model,
+                     extra_body={"reasoning_effort": effort or "none"},
+                     mode=os.environ.get("HUNCH_MODE", "auto"))
+    return Settings(backend_url=url, backend_api_key=key, models={spec.name: spec}, default_model=spec.name,
+                    max_concurrency=int(os.environ.get("HUNCH_CONCURRENCY", "16")),
+                    api_keys=frozenset(k.strip() for k in os.environ.get("HUNCH_API_KEYS", "").split(",") if k.strip()))

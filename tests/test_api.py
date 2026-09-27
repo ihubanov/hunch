@@ -734,3 +734,146 @@ def test_no_build_artifacts_are_tracked():
     tracked = subprocess.run(["git", "ls-files", "build", "dist", "*.egg-info"], cwd=root,
                              capture_output=True, text=True).stdout.split()
     assert tracked == []
+
+
+# ---------------------------------------------------------------- zero-config: library, CLI, MCP
+ENV_VARS = ("HUNCH_BACKEND_URL", "HUNCH_BACKEND_KEY", "HUNCH_BACKEND_MODEL", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL", "OPENAI_BASE_URL", "OPENAI_API_BASE", "OPENAI_API_KEY",
+            "OPENAI_MODEL", "LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL", "HUNCH_CONFIG", "HUNCH_MODE", "HUNCH_EFFORT")
+
+
+@pytest.fixture
+def clean_env(monkeypatch, tmp_path):
+    for v in ENV_VARS:
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.chdir(tmp_path)          # no stray ./hunch.toml
+    return monkeypatch
+
+
+def test_discovery_reads_the_agents_own_llm_settings(clean_env):
+    from hunch.config import discover_settings
+    clean_env.setenv("ANTHROPIC_BASE_URL", "http://gw.test:9510/v1")
+    clean_env.setenv("ANTHROPIC_MODEL", "org/main-model")
+    clean_env.setenv("ANTHROPIC_SMALL_FAST_MODEL", "org/small")          # never the default
+    s = discover_settings()
+    spec = s.resolve(None)
+    assert (s.backend_url, spec.backend_model, spec.mode, s.backend_api_key) == \
+        ("http://gw.test:9510", "org/main-model", "auto", None)           # no key is normal
+    clean_env.setenv("ANTHROPIC_AUTH_TOKEN", "tok")
+    clean_env.setenv("HUNCH_BACKEND_URL", "http://override.test")          # Hunch-specific wins
+    s = discover_settings()
+    assert (s.backend_url, s.backend_api_key) == ("http://override.test", "tok")
+
+
+def test_discovery_refuses_an_api_without_logprobs(clean_env):
+    from hunch.config import DiscoveryError, discover_settings
+    clean_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    clean_env.setenv("ANTHROPIC_MODEL", "claude-x")
+    with pytest.raises(DiscoveryError, match="no token logprobs"):
+        discover_settings()
+    clean_env.delenv("ANTHROPIC_BASE_URL")
+    with pytest.raises(DiscoveryError, match="no LLM endpoint"):
+        discover_settings()
+
+
+def test_discovery_uses_the_only_served_model(clean_env):
+    from hunch import config
+    clean_env.setenv("OPENAI_BASE_URL", "http://one.test/v1")
+    clean_env.setattr(config, "served_models", lambda url, key, timeout=15.0: ["org/only"])
+    assert config.discover_settings().resolve(None).backend_model == "org/only"
+    clean_env.setattr(config, "served_models", lambda url, key, timeout=15.0: ["a", "b"])
+    with pytest.raises(config.DiscoveryError, match="serves 2 models"):
+        config.discover_settings()
+
+
+def test_library_judges_with_no_server_and_no_toml(clean_env):
+    from hunch import judge
+    clean_env.setenv("HUNCH_BACKEND_URL", "http://backend.test")
+    clean_env.setenv("HUNCH_BACKEND_MODEL", "org/fast-model")
+    transport, state = fake_backend()
+    out = judge({"q": "text"}, {"a": {"kind": "yesno", "question": "yes-please?"}}, transport=transport)
+    assert out["model"] == "org/fast-model"
+    assert out["results"]["a"]["p_yes"] == pytest.approx(0.7 / 0.9, abs=1e-3)
+    assert state["probes"] == 1                     # mode=auto probed once...
+    judge("x", {"a": {"kind": "yesno", "question": "yes-please?"}}, transport=transport)
+    assert state["probes"] == 1                     # ...and remembered for the process
+
+
+def test_library_works_inside_a_running_event_loop(clean_env):
+    import asyncio
+    from hunch import ajudge, judge
+    clean_env.setenv("HUNCH_BACKEND_URL", "http://backend.test")
+    clean_env.setenv("HUNCH_BACKEND_MODEL", "org/fast-model")
+    transport, _ = fake_backend()
+    checks = {"a": {"kind": "yesno", "question": "yes-please?"}}
+
+    async def go():
+        blocking = judge("x", checks, transport=transport)        # from inside a loop: runs on a thread
+        native = await ajudge("x", checks, transport=transport)
+        return blocking, native
+    blocking, native = asyncio.run(go())
+    assert blocking["results"] == native["results"]
+
+
+def test_library_errors_are_hunch_errors(clean_env):
+    from hunch import HunchError, judge
+    with pytest.raises(HunchError) as e:
+        judge("x", {"a": {"kind": "yesno", "question": "q"}})
+    assert e.value.code == "invalid_request" and "no LLM endpoint" in e.value.message
+    clean_env.setenv("HUNCH_BACKEND_URL", "http://backend.test")
+    clean_env.setenv("HUNCH_BACKEND_MODEL", "m")
+    with pytest.raises(HunchError) as e:
+        judge("x", {"a": {"kind": "nope"}})
+    assert e.value.code == "invalid_request"
+
+
+def test_cli_judge_prints_json(clean_env, capsys):
+    import functools
+    from hunch import client
+    from hunch.__main__ import main
+    clean_env.setenv("HUNCH_BACKEND_URL", "http://backend.test")
+    clean_env.setenv("HUNCH_BACKEND_MODEL", "org/fast-model")
+    transport, _ = fake_backend()
+    clean_env.setattr(client.httpx, "AsyncClient", functools.partial(httpx.AsyncClient, transport=transport))
+    code = main(["judge", json.dumps({"context": "x", "checks": {"a": {"kind": "yesno", "question": "yes-please?"}}})])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0 and out["results"]["a"]["kind"] == "yesno"
+    assert main(["judge", "not json"]) == 2
+
+
+def test_mcp_server_handshake_list_and_call(clean_env):
+    import functools
+    import io
+    from hunch import client, mcp
+    clean_env.setenv("HUNCH_BACKEND_URL", "http://backend.test")
+    clean_env.setenv("HUNCH_BACKEND_MODEL", "org/fast-model")
+    transport, _ = fake_backend()
+    clean_env.setattr(client.httpx, "AsyncClient", functools.partial(httpx.AsyncClient, transport=transport))
+    msgs = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "judge", "arguments": {
+            "context": "x", "checks": {"a": {"kind": "yesno", "question": "yes-please?"}}}}},
+        {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "judge", "arguments": {
+            "checks": {"a": {"kind": "bogus"}}}}},
+        {"jsonrpc": "2.0", "id": 5, "method": "no/such"},
+    ]
+    out = io.StringIO()
+    mcp.serve(io.StringIO("\n".join(json.dumps(m) for m in msgs) + "\n"), out)
+    replies = {r["id"]: r for r in map(json.loads, out.getvalue().splitlines())}
+    assert set(replies) == {1, 2, 3, 4, 5}                                  # no reply to the notification
+    assert replies[1]["result"]["serverInfo"]["name"] == "hunch" and "tools" in replies[1]["result"]["capabilities"]
+    assert [t["name"] for t in replies[2]["result"]["tools"]] == ["judge"]
+    call = replies[3]["result"]
+    assert not call.get("isError") and call["structuredContent"]["results"]["a"]["kind"] == "yesno"
+    assert replies[4]["result"]["isError"] is True and "invalid_request" in replies[4]["result"]["content"][0]["text"]
+    assert replies[5]["error"]["code"] == -32601
+
+
+def test_importing_hunch_does_not_load_the_web_server():
+    import subprocess
+    import sys
+    code = "import sys, hunch; hunch.judge; print('fastapi' in sys.modules, 'uvicorn' in sys.modules)"
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout.strip()
+    assert out == "False False"

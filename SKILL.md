@@ -14,6 +14,10 @@ one constrained output token per check, no text to parse. Repo: https://github.c
 
 ## The call
 
+In Python with no server: `from hunch import judge; judge(context, checks, images=None)`. It uses the agent's own
+LLM endpoint (`ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` / `HUNCH_BACKEND_URL`). From a shell:
+`python -m hunch judge '<json>'`. As a tool: `python -m hunch mcp`. Over HTTP:
+
 ```http
 POST {HUNCH_URL}/v1/judge
 Content-Type: application/json

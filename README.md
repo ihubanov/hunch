@@ -30,6 +30,26 @@ on fire vs one lit by fireworks), four vision models qualify, one of them a 4-bi
 
 ## Quick start
 
+**Inside an agent that already talks to a vLLM endpoint, there's nothing to set up.** Hunch reads the endpoint and
+model the agent already uses (`ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL`, `OPENAI_BASE_URL` / `OPENAI_MODEL`, …) and runs
+in-process, with no server and no config file:
+
+```python
+from hunch import judge      # pip install "hunch @ git+https://github.com/ihubanov/hunch"
+r = judge({"ticket": "Charged twice for order A-104."},
+          {"refund": {"kind": "yesno", "question": "Is the customer asking for money back?"}})
+r["results"]["refund"]["p_yes"]
+```
+
+The same from a shell, or as a tool the agent starts itself (see [Zero-config](#zero-config-library-cli-mcp)):
+
+```bash
+python -m hunch judge '{"context": "...", "checks": {...}}'     # one call, JSON out
+claude mcp add hunch -- python -m hunch mcp                       # a `judge` tool for Claude Code
+```
+
+As a shared service:
+
 ```bash
 pip install .            # or: docker build -t hunch .
 export HUNCH_BACKEND_URL=http://localhost:8000          # your vLLM server
@@ -151,7 +171,44 @@ Hunch asks for exactly **one constrained token** and reads the probability the m
 The probability is what makes this useful in code: you pick the threshold per decision, based on how costly a
 mistake is. That's a plain `if p_yes >= 0.9`, not a prompt tweak.
 
-## Using it from Python
+## Zero-config: library, CLI, MCP
+
+The same engine runs three more ways, all using **the LLM the agent already has** instead of a separate setup:
+
+| | How | For |
+| --- | --- | --- |
+| Library | `from hunch import judge, ajudge` | Python agents and scripts: in-process, no server |
+| One-shot CLI | `python -m hunch judge '<json>'` (or `-` for stdin) | shells, other languages, cron |
+| MCP server | `python -m hunch mcp` (stdio, one `judge` tool) | agents that call tools: the agent starts it on demand |
+| HTTP server | `python -m hunch` | a shared service; unchanged, and now also zero-config |
+
+Settings are found in this order: arguments (`judge(..., base_url=, api_key=, model=)`), a `hunch.toml`, then the
+agent's own variables. The first one set wins:
+
+| | Variables |
+| --- | --- |
+| Endpoint | `HUNCH_BACKEND_URL`, `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `OPENAI_API_BASE`, `LLM_BASE_URL` (a trailing `/v1` is fine) |
+| Key | `HUNCH_BACKEND_KEY`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `LLM_API_KEY`. None at all is fine |
+| Model | `HUNCH_BACKEND_MODEL`, `ANTHROPIC_MODEL`, `OPENAI_MODEL`, `LLM_MODEL`; if none is set and the endpoint serves one model, that one |
+
+- **Mode is `auto`:** one probe per model (remembered for the process) decides between one token and
+  [deliberate](#deliberate-mode), so thinking models work without a setting. Override with `HUNCH_MODE`, or set
+  `HUNCH_EFFORT` for thinking models.
+- **The main model, not the small one.** `ANTHROPIC_SMALL_FAST_MODEL` is deliberately not read. Run
+  `python -m hunch qualify` on whatever you point it at.
+- **It needs token logprobs.** The endpoint has to be an OpenAI-compatible vLLM server (a gateway in front of one is
+  fine). Anthropic's API returns no logprobs and can't constrain the answer, so an agent running on Claude itself
+  should set `HUNCH_BACKEND_URL` to a vLLM server; pointing at `api.anthropic.com` is refused with that message.
+- `judge()` blocks, and is safe to call from code that already runs an event loop. `ajudge()` is the async version.
+  Both return the HTTP API's `{"model", "results", "usage"}` and raise `hunch.HunchError` (`.code`, `.message`).
+
+MCP config for other clients:
+
+```json
+{"mcpServers": {"hunch": {"command": "python", "args": ["-m", "hunch", "mcp"]}}}
+```
+
+## Using it over HTTP
 
 No client library is needed; it's one POST:
 

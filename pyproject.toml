@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hunch"
-version = "1.5.4"
+version = "1.6.0"
 description = "Calibrated yes/no, pick-one and scale judgments from your own LLMs, read straight off the logprobs"
 readme = "README.md"
 license = "MIT"
@@ -19,6 +19,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+
+[project.scripts]
+hunch = "hunch.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/ihubanov/hunch"
