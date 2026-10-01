@@ -517,6 +517,15 @@ GLM-5.3 on the 240 pairs:
 `low` costs barely more than one-token mode, which suits cheap high-volume checks where you re-run or review the
 borderline cases; the default is what belongs behind a 0.9 gate. Measure it on your own task.
 
+**Size the caller's timeout above the thinking, not Hunch's.** Hunch's own backend timeout (`timeout_s`, 30s by
+default) is rarely the one that bites: a caller with an 8-second budget gives up first and gets nothing back,
+usually fail-open. Measured here on DeepSeek-V4.1-Flash in deliberate mode: ~62 thinking tokens, ~1.5s per check.
+GLM-5.3's untamed tail reaches 3579 thinking tokens, so budget seconds, not milliseconds.
+Two things to know when a call is slower than that: **some backends ignore `reasoning_effort` entirely** (on our
+gateway DeepSeek thought ~62 tokens at `low`, default and `high` alike — identical latency), so if a check takes far
+longer than its thinking tokens suggest, suspect queueing on a shared endpoint or a larger context, not the effort
+setting; and check `effort` in the response, which reports what was actually sent.
+
 **`think_budget` is a cap, not a knob.** Raising it does not make the model think longer, and lowering it does not
 make it think less — it only decides whether a long answer arrives or the call raises. Measured on GLM at default
 effort: median 128 thinking tokens, p95 671, max 3579, so a 512 cap truncated 3% of checks. With `effort` set the
