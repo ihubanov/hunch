@@ -520,7 +520,9 @@ borderline cases; the default is what belongs behind a 0.9 gate. Measure it on y
 **Size the caller's timeout above the thinking, not Hunch's.** Hunch's own backend timeout (`timeout_s`, 30s by
 default) is rarely the one that bites: a caller with an 8-second budget gives up first and gets nothing back,
 usually fail-open. Measured here on DeepSeek-V4.1-Flash in deliberate mode: ~62 thinking tokens, ~1.5s per check.
-GLM-5.3's untamed tail reaches 3579 thinking tokens, so budget seconds, not milliseconds.
+GLM-5.3's untamed tail reaches 3579 thinking tokens, so budget seconds, not milliseconds. Size it above the
+**p99 of your own checks, not the median** — a 2.4s median with a 16s tail (we saw one) still fails the call that
+lands in the tail, and that looks like a flaky judge rather than a tight budget.
 Two things to know when a call is slower than that: **some backends ignore `reasoning_effort` entirely** (on our
 gateway DeepSeek thought ~62 tokens at `low`, default and `high` alike — identical latency), so if a check takes far
 longer than its thinking tokens suggest, suspect queueing on a shared endpoint or a larger context, not the effort
