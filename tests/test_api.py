@@ -895,3 +895,29 @@ def test_response_reports_mode_and_effort_actually_applied():
     assert (ignored["mode"], ignored["effort"]) == ("one_token", None)
     assert "not applied" in ignored["notes"][0]                        # never silently dropped
     assert (applied["mode"], applied["effort"], "notes" in applied) == ("deliberate", "high", False)
+
+
+def test_hunch_mode_env_warns_when_a_config_file_declares_models(monkeypatch, tmp_path, capsys):
+    from hunch.config import load_settings
+    f = tmp_path / "hunch.toml"
+    f.write_text('[backend]\nurl = "http://b"\n[models.m]\nbackend_model = "x"\n')
+    monkeypatch.setenv("HUNCH_MODE", "deliberate")
+    s = load_settings(f)
+    err = capsys.readouterr().err
+    assert "ignoring HUNCH_MODE" in err and "per model" in err
+    assert s.models["m"].mode == "one_token"          # precedence unchanged: the file wins
+    monkeypatch.delenv("HUNCH_MODE")
+    load_settings(f)
+    assert "ignoring HUNCH_MODE" not in capsys.readouterr().err
+
+
+def test_hunch_mode_env_applies_when_no_config_declares_models(monkeypatch, tmp_path, capsys):
+    from hunch import config
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HUNCH_MODE", "deliberate")
+    monkeypatch.setenv("HUNCH_EFFORT", "low")
+    monkeypatch.setenv("HUNCH_BACKEND_URL", "http://gw.test")
+    monkeypatch.setenv("HUNCH_BACKEND_MODEL", "org/m")
+    s = config.discover_settings()
+    assert (s.resolve(None).mode, s.resolve(None).extra_body["reasoning_effort"]) == ("deliberate", "low")
+    assert "ignoring" not in capsys.readouterr().err

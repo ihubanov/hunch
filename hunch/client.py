@@ -15,7 +15,8 @@ Settings, first match wins:
        model     HUNCH_BACKEND_MODEL, ANTHROPIC_MODEL, OPENAI_MODEL, LLM_MODEL; if none is set and the
                  endpoint serves exactly one model, that one
   mode defaults to "auto" (one probe, cached per process): thinking models are asked in deliberate
-  mode without any setting. HUNCH_MODE / HUNCH_EFFORT override it.
+  mode without any setting. HUNCH_MODE / HUNCH_EFFORT override it *in this discovered path only*; with a
+  hunch.toml they are ignored, because `mode` and `effort` are per model in the file.
 
 The endpoint must be an OpenAI-compatible vLLM server: Hunch reads token logprobs under a constrained
 choice, which hosted APIs without logprobs cannot provide. A missing capability is reported up front.

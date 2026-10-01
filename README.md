@@ -191,6 +191,10 @@ agent's own variables. The first one set wins:
 | Key | `HUNCH_BACKEND_KEY`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `LLM_API_KEY`. None at all is fine |
 | Model | `HUNCH_BACKEND_MODEL`, `ANTHROPIC_MODEL`, `OPENAI_MODEL`, `LLM_MODEL`; if none is set and the endpoint serves one model, that one |
 
+- **`HUNCH_MODE` / `HUNCH_EFFORT` apply only on this discovered path.** `mode` and `effort` are per model in a
+  config file, so a config file wins and Hunch prints a warning to stderr if you set the variables while one
+  declares models. Set `mode` in the file there. (This is the trap that costs an hour: the variables look like
+  they worked, because the same values appear in the response either way.)
 - **Mode is `auto`:** one probe per model (remembered for the process) decides between one token and
   [deliberate](#deliberate-mode). It catches models with *no* thinking-off mode (GLM-5.3), but not models whose
   thinking-off answers are merely worse: DeepSeek-V4.1-Flash probes as one-token and fails `qualify` that way. For
@@ -571,6 +575,7 @@ effort = "low"
 | `HUNCH_DEFAULT_MODEL` | Overrides `service.default_model` |
 | `HUNCH_CONCURRENCY` | Simultaneous backend calls. Keep it modest on a shared server |
 | `HUNCH_BACKEND_MODEL` + `mode` in `hunch.toml` | `one_token` (default), `deliberate` or `auto` — see [Deliberate mode](#deliberate-mode) |
+| `HUNCH_MODE`, `HUNCH_EFFORT` | Override `mode` / `effort` for a model **discovered from the environment**. Ignored (with a warning) when a config file declares models — set them in the file instead |
 | `SSL_CERT_FILE` | CA bundle for a backend behind a private or self-signed CA, e.g. `/etc/ssl/certs/ca-certificates.crt` (Python doesn't use the system store by default) |
 | `HUNCH_API_KEYS` | Comma-separated bearer keys. Hunch **refuses** to listen beyond localhost without them (or `HUNCH_ALLOW_NOAUTH=1` behind an authenticating proxy) |
 

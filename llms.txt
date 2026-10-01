@@ -14,5 +14,5 @@
 - Check kinds: `yesno` (-> `p_yes`), `pick` (1-300 options -> `pick`, `probs`, `confidence`), `scale` (1-10 ordered levels -> `value`, `probs`, `confidence`).
 - Also: `GET /v1/models`, `GET /health`, `python -m hunch selftest`, `python -m hunch qualify <model>`.
 - The highest-value rule: name the look-alike case in `no_if` / option descriptions. Vague checks cost 17-24 accuracy points.
-- Thinking models: set `mode = "deliberate"` (think first, constrain only the verdict token). `qualify` tries it automatically when one-token mode fails.
+- Thinking models: set `mode = "deliberate"` in hunch.toml (think first, constrain only the verdict token). `qualify` tries it automatically when one-token mode fails. `HUNCH_MODE`/`HUNCH_EFFORT` work only when no config file declares models.
 - Images: qualified on 188 hand-labelled look-alike photos (Gemma-4-31B 98.4%, ECE 0.016); benchmark in `bench/images.py`.

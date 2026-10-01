@@ -6,6 +6,7 @@ Quickest setup without a file: HUNCH_BACKEND_URL + HUNCH_BACKEND_MODEL (exposed 
 from __future__ import annotations
 
 import os
+import sys
 import pathlib
 
 from dataclasses import dataclass, field, replace
@@ -59,6 +60,19 @@ class Settings:
         return self.models.get(name or self.default_model or "")
 
 
+def _warn_ignored_mode_env(models: dict[str, "ModelSpec"], path: str | os.PathLike | None) -> None:
+    """HUNCH_MODE / HUNCH_EFFORT only apply when a model is DISCOVERED from the environment, because `mode`
+    is per model in a config file. Say so out loud: silently ignoring them once cost a caller an hour, and our
+    own error message recommends HUNCH_MODE."""
+    setvars = [v for v in ("HUNCH_MODE", "HUNCH_EFFORT") if os.environ.get(v)]
+    if setvars and models:
+        print(f"hunch: ignoring {' and '.join(setvars)} because {path or 'a hunch.toml'} configures "
+              f"{len(models)} model(s). `mode` and `effort` are per model there; set them in the file "
+              f"(HUNCH_MODE/HUNCH_EFFORT apply only when no config file declares models).", file=sys.stderr)
+    elif setvars:
+        pass  # no models declared here; discover_settings() will use them
+
+
 def load_settings(path: str | os.PathLike | None = None) -> Settings:
     raw: dict = {}
     path = path or os.environ.get("HUNCH_CONFIG") or ("hunch.toml" if pathlib.Path("hunch.toml").exists() else None)
@@ -77,6 +91,7 @@ def load_settings(path: str | os.PathLike | None = None) -> Settings:
     if not models and os.environ.get("HUNCH_BACKEND_MODEL"):
         models = {"default": ModelSpec(name="default", backend_model=os.environ["HUNCH_BACKEND_MODEL"],
                                        debias=os.environ.get("HUNCH_DEBIAS", "0") == "1")}
+    _warn_ignored_mode_env(models, path)
     svc = raw.get("service", {})
     backend = raw.get("backend", {})
     default_model = os.environ.get("HUNCH_DEFAULT_MODEL", svc.get("default_model")) or (next(iter(models)) if models else None)

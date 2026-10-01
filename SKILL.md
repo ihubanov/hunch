@@ -98,6 +98,7 @@ DeepSeek-V4.1-Flash in deliberate mode. For images, `python bench/images.py` run
 
 ## What not to do
 
+- **Set `mode = "deliberate"` in `hunch.toml`, not via `HUNCH_MODE`.** The variable applies only when a model is discovered from the environment; with a config file it is ignored, with a warning, because `mode` is per model there.
 - **Don't judge a thinking model on one token.** Some have no thinking-off mode (GLM-5.3: 66.7% on one
   token, 97.5% when it thinks first), and some have one that answers worse than it thinks
   (DeepSeek-V4.1-Flash: fails calibration on one token, 98.8% with ~60 thinking tokens). Set
