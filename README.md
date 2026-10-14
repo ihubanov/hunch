@@ -556,6 +556,32 @@ counts as qualified if either mode passes.
 - **Treat `p_yes` and `confidence` as uncalibrated for your task** until you've checked them against 20–40
   labelled cases.
 
+## Framing-invariance: catch a leading check
+
+A yes/no answer can be driven by how the question is *worded* rather than by the facts — a check phrased to expect
+`yes` can inflict `yes`. `debias` already flips the label order; `judge_framed` flips the question **framing**. Give a
+check a `framings` list — alternate phrasings of the same question, each tagged `"polarity": "same"` (a reword) or
+`"flip"` (the complement, e.g. *"is X irrelevant?"*) — and every framing is judged in the one request and folded onto
+a single *P(true)* axis:
+
+```python
+from hunch import judge_framed
+r = judge_framed("Fix the error-handling in the request path.", {
+    "relevant": {"kind": "yesno",
+                 "question": "Is this note relevant to the task?",
+                 "framings": [{"question": "Is this note irrelevant / unrelated to the task?",
+                               "polarity": "flip"}]}})
+r["results"]["relevant"]   # {"p_yes": ..., "swing": ..., "framing_flag": ..., "views": {...}}
+```
+
+`p_yes` is the consensus (mean of the framings' *P(true)* — the robust estimate to threshold); `swing` is the spread
+between framings; `framing_flag` is `True` when `swing` exceeds `swing_gate` (default `0.25`), i.e. the wording, not
+the content, is moving the answer — trust that `p_yes` less, or neutralise the question. Checks with no `framings`
+pass through `judge_framed` exactly as `judge` returns them, so it is a drop-in you turn on per check.
+
+It catches *framing*-driven answers. It does **not** catch a model that is stably wrong under every framing — that is
+the model believing the wrong thing, and it needs evidence or grounding, not this.
+
 ## Configuration
 
 `hunch.toml` (path in `HUNCH_CONFIG`, or `./hunch.toml`). See [`hunch.toml.example`](hunch.toml.example):
