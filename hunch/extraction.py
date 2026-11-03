@@ -317,7 +317,7 @@ async def extract(engine: Engine, spec: ModelSpec, context: Any, fields: Any, *,
 async def _extract_sampled(engine: Engine, spec: ModelSpec, msgs: list[dict], fields: dict[str, dict], source: str,
                            min_probability: float | None, now: dt.date | None) -> tuple[dict, Usage]:
     body = {"model": spec.backend_model, "messages": msgs, "temperature": spec.sample_temperature,
-            "max_tokens": spec.extract_max_tokens, **spec.extra_body}
+            "max_tokens": spec.extract_max_tokens + spec.think_budget, **spec.extra_body}   # room to think first
     replies = await asyncio.gather(*[engine.post_chat(spec, body) for _ in range(max(1, spec.samples))])
     usage, answers = Usage(), []
     for data in replies:

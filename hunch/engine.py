@@ -29,22 +29,33 @@ THINKING_OFF_EFFORTS = ("none", "off", "disable", "disabled")
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 DIGITS = "0123456789"
 MAX_LEVELS = len(DIGITS)
-SAMPLE_MAX_TOKENS = 8       # mode "sample": room for "Y", "Yes." or "**B**", never an essay
 MAX_SORT_ITEMS = 100
 MAX_TAGS = 50
 
 
 def read_label(text: str, labels: str) -> str | None:
-    """The label a free-text reply names (mode "sample"): the first allowed label character, or yes / no."""
-    t = text.strip().lstrip("*_`\"' (").upper()
-    if not t:
+    """The label a free-text reply names (mode "sample"): its first word, or else its last line.
+
+    Some hosted models work the answer out in plain text and give the label at the end
+    ("... average 78, at least 75.\n\nY"), so a reply whose first word is not a label is read from
+    its last line, exactly as deliberate mode reads the verdict that follows the thinking."""
+    def head(t: str) -> str | None:
+        t = t.strip().lstrip("*_`\"' (").upper()
+        if not t:
+            return None
+        if set(labels) == {"Y", "N"}:
+            if t.startswith("YES"):
+                return "Y"
+            if t.startswith("NO"):
+                return "N"
+        # a lone label, not the first letter of a word or sentence ("Scores: ..." is not S, "A customer" not A)
+        if t[0] in labels and (len(t) == 1 or t[1] in ").]:*_`'\"-"):
+            return t[0]
         return None
-    if labels == "YN" or set(labels) == {"Y", "N"}:
-        if t.startswith("YES"):
-            return "Y"
-        if t.startswith("NO"):
-            return "N"
-    return t[0] if t[0] in labels else None
+    lines = [ln for ln in text.strip().splitlines() if ln.strip()]
+    if not lines:
+        return None
+    return head(lines[0]) or (head(lines[-1]) if len(lines) > 1 else None)
 
 
 def effective_extra_body(spec: ModelSpec, deliberate: bool) -> dict:
@@ -211,8 +222,12 @@ class Engine:
         Answers are read leniently (the first allowed label in the reply, or yes / no for Y / N), because
         there is no constraint to enforce the format. Replies with no label are discarded; if none of the
         samples answers, the call fails rather than guess.
+
+        max_tokens is think_budget, not a handful: hosted models may think before answering (some do it only
+        on harder questions), and a small cap cuts them off with an empty reply. A direct answer still stops
+        after its one label, so the cap only costs when the model actually thinks.
         """
-        body = {"model": spec.backend_model, "messages": msgs, "max_tokens": SAMPLE_MAX_TOKENS,
+        body = {"model": spec.backend_model, "messages": msgs, "max_tokens": spec.think_budget,
                 "temperature": spec.sample_temperature, **spec.extra_body}
         replies = await asyncio.gather(*[self.post_chat(spec, body) for _ in range(max(1, spec.samples))])
         votes = {lab: 0 for lab in labels}
@@ -229,7 +244,7 @@ class Engine:
                 votes[lab] += 1
         n = sum(votes.values())
         if n == 0:
-            raise HunchError(502, "backend_error", f"none of {spec.samples} sampled replies named one of {list(labels)}")
+            raise HunchError(502, "no_label", f"none of {spec.samples} sampled replies named one of {list(labels)}")
         return {k: v / n for k, v in votes.items()}, usage
 
     async def mode_for(self, spec: ModelSpec) -> str:
@@ -392,7 +407,7 @@ class Engine:
         groups = even_chunks(options, self.s.group_size)
         glabels = LETTERS[:len(groups)]
         calls = [self.label_probs(spec, prompts.messages(ctx, prompts.pick_groups(question, groups, glabels)), glabels)]
-        calls += [self.label_probs(spec, prompts.messages(ctx, prompts.pick(question, g, LETTERS[:len(g)])), LETTERS[:len(g)]) for g in groups]
+        calls += [self._within_group(spec, ctx, question, g) for g in groups]
         results = await asyncio.gather(*calls)
         usage = Usage()
         for _, u in results:
@@ -404,6 +419,18 @@ class Engine:
                 dist[key] = pg[glab] * pw[lab]
         total = sum(dist.values()) or 1.0
         return {k: v / total for k, v in dist.items()}, usage
+
+    async def _within_group(self, spec, ctx, question, group) -> tuple[dict[str, float], Usage]:
+        """P(option | group). Unconstrained (mode "sample"), a model shown a group that lacks the answer may
+        decline to pick from it ("none of these"). That is no preference within the group, not an error: the
+        group call already gives such a group almost no weight."""
+        labels = LETTERS[:len(group)]
+        try:
+            return await self.label_probs(spec, prompts.messages(ctx, prompts.pick(question, group, labels)), labels)
+        except HunchError as e:
+            if e.code != "no_label":
+                raise
+            return {lab: 1 / len(labels) for lab in labels}, Usage(backend_calls=spec.samples)
 
     async def scale(self, spec, ctx, c) -> tuple[dict, Usage]:
         levels = list(c["levels"])

@@ -126,14 +126,52 @@ def test_sample_mode_counts_votes():
     assert r.status_code == 200, r.text
     assert out["results"]["q"]["p_yes"] == 0.75 and out["mode"] == "sample" and out["samples"] == 4
     assert out["usage"]["backend_calls"] == 4
-    assert all(b["temperature"] == 1.0 and b["max_tokens"] <= 8 for b in state["bodies"])
+    assert all(b["temperature"] == 1.0 and b["max_tokens"] == SAMPLED.models["h"].think_budget for b in state["bodies"])
+
+
+def test_sample_mode_skips_replies_cut_off_while_thinking():
+    """A hosted model that thinks first returns no content when cut off; those votes are dropped, not misread."""
+    transport, _ = sampling_backend(["", "", "Y", "N"])
+    with TestClient(create_app(SAMPLED, transport=transport)) as c:
+        r = judge(c, {"q": {"kind": "yesno", "question": "x"}})
+    assert r.json()["results"]["q"]["p_yes"] == 0.5
+
+
+@pytest.mark.parametrize("text,labels,want", [
+    ("Y", "YN", "Y"), ("Yes.", "YN", "Y"), ("no", "YN", "N"), ("**B**", "ABC", "B"), ("C) sales", "ABC", "C"),
+    ("Scores: 60, 80. Average 78, at least 75.\n\nY", "YN", "Y"),     # worked out in text, label last
+    ("Because the total is 12\nAnswer: B", "AB", None),               # last line isn't a lone label
+    ("Absolutely", "AB", None), ("A customer is upset.", "AB", None), ("B.", "AB", "B"), ("", "YN", None),
+])
+def test_read_label(text, labels, want):
+    from hunch.engine import read_label
+    assert read_label(text, labels) == want
 
 
 def test_sample_mode_fails_when_nobody_answers():
     transport, _ = sampling_backend(["I cannot say."])
     with TestClient(create_app(SAMPLED, transport=transport)) as c:
         r = judge(c, {"q": {"kind": "pick", "options": {"a": None, "b": None}}})
-    assert r.status_code == 502 and "sampled replies" in r.json()["error"]["message"]
+    assert r.status_code == 502 and r.json()["error"]["code"] == "no_label" and "sampled replies" in r.json()["error"]["message"]
+
+
+def test_sample_mode_grouped_pick_tolerates_a_group_without_the_answer():
+    """20 options -> a group call plus one call per group. The group lacking the answer gets 'none of these'."""
+    def handler(request):
+        body = json.loads(request.content)
+        user = body["messages"][-1]["content"]
+        if "GROUP A:" in user:
+            text = "A"                                   # the group call: the answer is in group A
+        elif "opt_3" in user:
+            text = "D"                                   # group A holds opt_3 at D
+        else:
+            text = "None of these options fit."          # group B: declines
+        return httpx.Response(200, json={"choices": [{"message": {"content": text}}], "usage": {}})
+    opts = {f"opt_{i}": None for i in range(20)}
+    with TestClient(create_app(SAMPLED, transport=httpx.MockTransport(handler))) as c:
+        r = judge(c, {"q": {"kind": "pick", "options": opts}})
+    assert r.status_code == 200, r.text
+    assert r.json()["results"]["q"]["pick"] == "opt_3"
 
 
 # ------------------------------------------------------------------ values

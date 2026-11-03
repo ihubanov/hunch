@@ -1,5 +1,5 @@
 """Hunch: calibrated decisions and source-grounded extraction from your own LLMs, read straight off the logprobs."""
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 
 from .client import aextract, ajudge, extract, judge  # noqa: E402,F401
 from .engine import HunchError  # noqa: E402,F401

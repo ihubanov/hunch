@@ -272,6 +272,7 @@ Errors come back as `{"error": {"code": "...", "message": "..."}}`:
 | 401 | `unauthorized` | `HUNCH_API_KEYS` is set and the bearer key is missing or wrong |
 | 413 | `context_too_long` | The context plus the question exceed the model's context window |
 | 502 | `backend_error` | The backend returned an error, or did **not** enforce the constraint (never turned into a made-up probability) |
+| 502 | `no_label` | Mode `sample`: none of the sampled replies named an allowed answer |
 | 503 | `backend_unavailable` | Still failing after retries (429 / 5xx / timeouts, with `Retry-After` honoured) |
 
 ### Backends without logprobs
@@ -282,8 +283,18 @@ asked `samples` times (default 7, `HUNCH_SAMPLES`) at `sample_temperature` (defa
 reply's first label is read leniently (`Y`, `Yes.`, `**B**`), and the probability is the share of votes. Extraction
 runs `samples` times too, and a field's probability is the share of samples that agree on it.
 
+Replies are read as a person would: the first word if it is a lone label (`Y`, `Yes.`, `**B**`, `C) sales`), else
+a lone label on the last line, since some hosted models work the answer out in plain text first and put the
+label last. `max_tokens` is `think_budget`, because hosted models may think before answering and a small cap
+returns an empty reply; a direct answer still stops after one token.
+
 The cost is real: probabilities move in 1/`samples` steps and every vote costs a full prompt (use the provider's
 prompt caching). Prefer a logprob backend when you have one. vLLM-only request fields are not sent in this mode.
+
+Measured through OpenRouter on Claude Haiku 5.5 (no logprobs), 5 votes per decision: the selftest's 12 cases
+12/12 (twice), its extraction case 5/5, and [multistep_decisions](#multistep-decisions-public-benchmark)
+**99/100** with ECE 0.010, at about 1,600 input and 690 output tokens per item (the model reasons in text on the
+harder items) and a 1.5 s p50.
 
 `GET /v1/models` lists the configured models, each with the `mode` its checks actually run in (`one_token` or
 `deliberate`; `auto` is resolved, with the configured value in `configured_mode`). `GET /health` checks that the backend serves them.
