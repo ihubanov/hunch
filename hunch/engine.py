@@ -444,10 +444,67 @@ class Engine:
 
     # ------------------------------------------------------------------ request
     async def judge(self, spec: ModelSpec, context: Any, checks: dict[str, dict],
-                    images: list[str] | None = None, min_probability: float | None = None) -> tuple[dict, Usage]:
+                    images: list[str] | None = None, min_probability: float | None = None,
+                    reasoning: str | None = None, escalate_below: float | None = None) -> tuple[dict, Usage]:
+        """Run every check in parallel. `reasoning` (see REASONING): None keeps the model's own mode;
+        "off" answers in one token; "on" thinks first; "auto" answers in one token and re-asks, with
+        thinking, only the checks whose probability is under `escalate_below` (default 0.9) or whose
+        answer a one-token pre-check says has to be worked out (arithmetic, counting, dates, rule chains)."""
         ctx = prompts.context_block(context, images or ())
         handlers = {"yesno": self.yesno, "pick": self.pick, "scale": self.scale, "tags": self.tags, "sort": self.sort}
-        tasks = {cid: asyncio.ensure_future(handlers[c["kind"]](spec, ctx, c)) for cid, c in checks.items()}
+        if reasoning is not None and reasoning not in REASONING:
+            raise HunchError(400, "invalid_request", f"`reasoning` must be one of {REASONING}")
+        if reasoning is not None and await self.mode_for(spec) == "sample":
+            reasoning = None          # votes have no one-token / thinking split; run as configured
+        floor = DEFAULT_ESCALATE_BELOW if escalate_below is None else escalate_below
+
+        async def run(cid: str, c: dict) -> tuple[dict, Usage]:
+            h = handlers[c["kind"]]
+            if reasoning is None:
+                r, u = await h(spec, ctx, c)
+                return with_answer(r, c, min_probability), u
+            if reasoning == "on":
+                r, u = await h(thinking_spec(spec), ctx, c)
+                return {**with_answer(r, c, min_probability), "reasoned": True}, u
+            if reasoning == "off":
+                r, u = await h(fast_spec(spec), ctx, c)
+                return {**with_answer(r, c, min_probability), "reasoned": False}, u
+            # auto: the cheap answer first, and, alongside it on the same cached context, a one-token
+            # pre-check of whether the answer has to be worked out. Think when either says so: confidence
+            # alone misses one-pass answers that are confidently wrong on a computed question.
+            usage = Usage()
+            fast_p, needs_steps = None, None
+            fast_task = asyncio.ensure_future(h(fast_spec(spec), ctx, c))
+            gate_task = asyncio.ensure_future(self.yesno(fast_spec(spec), ctx, prompts.needs_steps_check(c)))
+            try:
+                g, gu = await gate_task
+                usage.add(gu)
+                needs_steps = g["p_yes"] < 0.5          # the check asks "can it be read directly?"
+            except HunchError as e:
+                if e.code != "backend_error":
+                    fast_task.cancel()
+                    raise
+            try:
+                r, u = await fast_task
+                usage.add(u)
+                r = with_answer(r, c, min_probability)
+                fast_p = r.get("probability")
+                sure = fast_p is None or fast_p >= floor   # sort has no probability: one pass is the answer
+                if sure and needs_steps is False:
+                    return {**r, "reasoned": False}, usage
+            except HunchError as e:
+                if e.code != "backend_error":            # e.g. a model with no thinking-off mode: think instead
+                    raise
+            r, u = await h(thinking_spec(spec), ctx, c)
+            usage.add(u)
+            out = {**with_answer(r, c, min_probability), "reasoned": True}
+            if fast_p is not None:
+                out["fast_probability"] = round(fast_p, 4)
+            if needs_steps is not None:
+                out["needs_steps"] = needs_steps
+            return out, usage
+
+        tasks = {cid: asyncio.ensure_future(run(cid, c)) for cid, c in checks.items()}
         try:
             await asyncio.gather(*tasks.values())
         except BaseException:
@@ -457,10 +514,26 @@ class Engine:
         usage, results = Usage(), {}
         for cid, t in tasks.items():
             result, used = t.result()
-            results[cid] = with_answer(result, checks[cid], min_probability)
+            results[cid] = result
             usage.add(used)
         return results, usage
 
+
+REASONING = ("off", "on", "auto")
+DEFAULT_ESCALATE_BELOW = 0.9
+
+
+def fast_spec(spec: ModelSpec) -> ModelSpec:
+    """The model answering in its first token, with thinking switched off."""
+    extra = dict(spec.extra_body)
+    if str(extra.get("reasoning_effort", "none")).lower() not in THINKING_OFF_EFFORTS:
+        extra["reasoning_effort"] = "none"            # a configured effort would switch thinking on
+    return replace(spec, mode="one_token", extra_body=extra)
+
+
+def thinking_spec(spec: ModelSpec) -> ModelSpec:
+    """The model thinking first, its final verdict token constrained (deliberate mode)."""
+    return replace(spec, mode="deliberate")
 
 def with_answer(result: dict, check: dict, min_probability: float | None = None) -> dict:
     """Add the uniform `answer` / `probability` pair to a result (additive: the kind's own fields stay).

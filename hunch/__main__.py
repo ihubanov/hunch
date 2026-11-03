@@ -58,7 +58,8 @@ def judge_cli(args: list[str]) -> int:
     try:
         req = json.loads(raw)
         out = judge(req.get("context", ""), req.get("checks"), images=req.get("images"),
-                    model=req.get("model"), effort=req.get("effort"), min_probability=req.get("min_probability"))
+                    model=req.get("model"), effort=req.get("effort"), min_probability=req.get("min_probability"),
+                    reasoning=req.get("reasoning"), escalate_below=req.get("escalate_below"))
     except json.JSONDecodeError as e:
         print(json.dumps({"error": {"code": "invalid_request", "message": f"not JSON: {e}"}}))
         return 2

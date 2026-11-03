@@ -60,9 +60,13 @@ async def _settings(base_url: str | None, api_key: str | None, model: str | None
 
 async def ajudge(context: Any = "", checks: dict[str, Any] | None = None, *, images: list[str] | None = None,
                  model: str | None = None, effort: str | None = None, min_probability: float | None = None,
+                 reasoning: str | None = None, escalate_below: float | None = None,
                  base_url: str | None = None, api_key: str | None = None,
                  transport: httpx.AsyncBaseTransport | None = None) -> dict:
-    """Async version of judge(). Returns {"model", "results", "usage"}; raises HunchError."""
+    """Async version of judge(). Returns {"model", "results", "usage"}; raises HunchError.
+
+    reasoning="auto" answers every check in one token and lets the model think only on the checks whose
+    probability is under escalate_below (default 0.9); "on" always thinks, "off" never does."""
     if not checks:
         raise HunchError(400, "invalid_request", "`checks` must contain at least one check")
     validate_images(images)
@@ -73,9 +77,12 @@ async def ajudge(context: Any = "", checks: dict[str, Any] | None = None, *, ima
         engine._detected = _MODES.setdefault((settings.backend_url, spec.backend_model), {})
         checks = validate_checks(checks, engine.max_options)
         spec = await apply_effort(engine, spec, effort)
-        results, usage = await engine.judge(spec, context, checks, images, min_probability)
+        results, usage = await engine.judge(spec, context, checks, images, min_probability,
+                                            reasoning=reasoning, escalate_below=escalate_below)
         info = await run_info(engine, spec, effort)
-    return {"model": spec.backend_model, "results": results,
+    extra = {} if reasoning is None else {"reasoning": reasoning,
+                                          "escalated": [c for c, r in results.items() if r.get("reasoned")]}
+    return {"model": spec.backend_model, "results": results, **extra,
             "usage": {"prompt_tokens": usage.prompt_tokens, "completion_tokens": usage.completion_tokens,
                       "backend_calls": usage.backend_calls}, **info}
 

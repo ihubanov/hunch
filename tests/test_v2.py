@@ -400,3 +400,102 @@ def test_library_extract_and_mcp_tool(monkeypatch, tmp_path):
     assert out["results"]["budget"]["value"]["amount"] == 450
     tools = mcp.handle({"method": "tools/list"})["tools"]
     assert [t["name"] for t in tools] == ["judge", "extract"]
+
+
+# ------------------------------------------------------------------ reasoning: off / on / auto
+def reasoning_backend(fast_p: dict, think_p: float = 0.99, fast_breaks: bool = False, gate_p: dict | None = None):
+    """One-token calls (max_tokens 1) answer Y with fast_p[word in question]; thinking calls think, then Y with think_p.
+    The auto pre-check ("can the answer be read directly?") answers Y with gate_p[word] (default 0.95: readable).
+    fast_breaks: the one-token call opens a scratchpad instead of answering (a model with no thinking-off mode)."""
+    state = {"fast": 0, "gate": 0, "think": 0, "bodies": []}
+
+    def handler(request):
+        body = json.loads(request.content)
+        state["bodies"].append(body)
+        user = body["messages"][-1]["content"]
+        deliberate = body["max_tokens"] > 1
+        if deliberate:
+            state["think"] += 1
+            p = think_p
+        elif "read directly" in user and not fast_breaks:
+            state["gate"] += 1
+            p = next((v for k, v in (gate_p or {}).items() if k in user), 0.95)
+        else:
+            state["fast"] += 1
+            if fast_breaks:
+                return httpx.Response(200, json={"choices": [{"message": {"content": "<think>", "reasoning": "hmm"},
+                    "logprobs": {"content": [{"token": "<think>", "logprob": 0.0, "top_logprobs": []}]}}]})
+            p = next(v for k, v in fast_p.items() if k in user)
+        top = [{"token": "Y", "logprob": math.log(p)}, {"token": "N", "logprob": math.log(1 - p)}]
+        toks = ([{"token": "thinking", "logprob": 0.0, "top_logprobs": []}] * 3 if deliberate else [])
+        toks.append({"token": "Y", "logprob": math.log(p), "top_logprobs": top})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Y"}, "logprobs": {"content": toks}}],
+                                         "usage": {"prompt_tokens": 100, "completion_tokens": len(toks)}})
+    return httpx.MockTransport(handler), state
+
+
+EFFORTFUL = replace(SETTINGS, models={"fast": replace(SETTINGS.models["fast"], mode="deliberate",
+                                                      extra_body={"reasoning_effort": "low"})})
+
+
+def test_reasoning_auto_thinks_only_on_unsure_checks():
+    transport, state = reasoning_backend({"easy": 0.97, "hard": 0.6})
+    with TestClient(create_app(EFFORTFUL, transport=transport)) as c:
+        r = judge(c, {"e": {"kind": "yesno", "question": "easy?"}, "h": {"kind": "yesno", "question": "hard?"}},
+                  reasoning="auto")
+    out = r.json()
+    assert r.status_code == 200, r.text
+    assert out["results"]["e"]["reasoned"] is False and out["results"]["e"]["p_yes"] == pytest.approx(0.97, abs=1e-3)
+    assert out["results"]["h"]["reasoned"] is True and out["results"]["h"]["fast_probability"] == pytest.approx(0.6, abs=1e-3)
+    assert out["results"]["h"]["p_yes"] == pytest.approx(0.99, abs=1e-3)
+    assert out["reasoning"] == "auto" and out["escalated"] == ["h"]
+    assert (state["fast"], state["gate"], state["think"]) == (2, 2, 1)
+    fast_bodies = [b for b in state["bodies"] if b["max_tokens"] == 1]
+    think_bodies = [b for b in state["bodies"] if b["max_tokens"] > 1]
+    assert all(b["reasoning_effort"] == "none" for b in fast_bodies)       # the configured effort can't leak in
+    assert all(b["reasoning_effort"] == "low" for b in think_bodies)
+
+
+def test_reasoning_auto_thinks_when_the_answer_must_be_worked_out_even_if_confident():
+    """A one-pass answer can be confidently wrong on a computed question; the pre-check catches it."""
+    transport, state = reasoning_backend({"total": 0.97, "plain": 0.97}, gate_p={"total": 0.1})
+    with TestClient(create_app(EFFORTFUL, transport=transport)) as c:
+        r = judge(c, {"t": {"kind": "yesno", "question": "Is the total over 100?"},
+                      "p": {"kind": "yesno", "question": "Is this plain?"}}, reasoning="auto")
+    res = r.json()["results"]
+    assert res["t"]["reasoned"] is True and res["t"]["needs_steps"] is True and res["t"]["fast_probability"] == pytest.approx(0.97, abs=1e-3)
+    assert res["p"]["reasoned"] is False and r.json()["escalated"] == ["t"] and state["think"] == 1
+
+
+def test_reasoning_auto_threshold_and_off_on():
+    transport, state = reasoning_backend({"easy": 0.97, "hard": 0.6})
+    with TestClient(create_app(EFFORTFUL, transport=transport)) as c:
+        loose = judge(c, {"h": {"kind": "yesno", "question": "hard?"}}, reasoning="auto", escalate_below=0.5)
+        off = judge(c, {"h": {"kind": "yesno", "question": "hard?"}}, reasoning="off")
+        on = judge(c, {"e": {"kind": "yesno", "question": "easy?"}}, reasoning="on")
+        bad = judge(c, {"h": {"kind": "yesno", "question": "hard?"}}, reasoning="sometimes")
+        bad2 = judge(c, {"h": {"kind": "yesno", "question": "hard?"}}, reasoning="auto", escalate_below=3)
+    assert loose.json()["results"]["h"]["reasoned"] is False
+    assert off.json()["results"]["h"]["reasoned"] is False and off.json()["escalated"] == []
+    assert on.json()["results"]["e"]["reasoned"] is True and on.json()["results"]["e"]["p_yes"] == pytest.approx(0.99, abs=1e-3)
+    assert bad.status_code == 400 and bad2.status_code == 400
+
+
+def test_reasoning_auto_thinks_when_the_model_cannot_answer_in_one_token():
+    transport, state = reasoning_backend({}, fast_breaks=True)
+    with TestClient(create_app(EFFORTFUL, transport=transport)) as c:
+        r = judge(c, {"q": {"kind": "yesno", "question": "x?"}}, reasoning="auto")
+    res = r.json()["results"]["q"]
+    assert r.status_code == 200, r.text
+    assert res["reasoned"] is True and "fast_probability" not in res and state["think"] == 1
+
+
+def test_reasoning_is_ignored_in_sample_mode_and_without_it_nothing_changes():
+    transport, _ = sampling_backend(["Y"])
+    with TestClient(create_app(SAMPLED, transport=transport)) as c:
+        r = judge(c, {"q": {"kind": "yesno", "question": "x"}}, reasoning="auto")
+    assert r.status_code == 200 and "reasoned" not in r.json()["results"]["q"]
+    c2, _ = client()
+    with c2:
+        plain = judge(c2, {"q": {"kind": "yesno", "question": "yes-please"}})
+    assert "reasoning" not in plain.json() and "reasoned" not in plain.json()["results"]["q"]

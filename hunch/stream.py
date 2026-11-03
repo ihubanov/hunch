@@ -32,10 +32,12 @@ class Session:
     """One growing text and a fixed set of checks."""
 
     def __init__(self, engine: Engine, spec: ModelSpec, checks: dict[str, dict], *,
-                 min_probability: float | None = None, text: str = ""):
+                 min_probability: float | None = None, text: str = "",
+                 reasoning: str | None = None, escalate_below: float | None = None):
         self.engine, self.spec = engine, spec
         self.checks = validate_checks(checks, engine.max_options)
         self.min_probability = min_probability
+        self.reasoning, self.escalate_below = reasoning, escalate_below
         self.text = text
         self.answers: dict[str, Any] = {}
         self.updates = 0
@@ -50,7 +52,8 @@ class Session:
     async def judge(self) -> dict:
         """Re-judge the text as it stands."""
         t0 = time.perf_counter()
-        results, usage = await self.engine.judge(self.spec, self.text, self.checks, min_probability=self.min_probability)
+        results, usage = await self.engine.judge(self.spec, self.text, self.checks, min_probability=self.min_probability,
+                                                 reasoning=self.reasoning, escalate_below=self.escalate_below)
         changed = [cid for cid, r in results.items() if self.updates == 0 or self.answers.get(cid) != r.get("answer")]
         self.answers = {cid: r.get("answer") for cid, r in results.items()}
         self.updates += 1
@@ -63,7 +66,8 @@ class Session:
 
 @contextlib.asynccontextmanager
 async def astream(checks: dict[str, Any], *, text: str = "", model: str | None = None, effort: str | None = None,
-                  min_probability: float | None = None, base_url: str | None = None, api_key: str | None = None,
+                  min_probability: float | None = None, reasoning: str | None = None,
+                  escalate_below: float | None = None, base_url: str | None = None, api_key: str | None = None,
                   transport: httpx.AsyncBaseTransport | None = None) -> AsyncIterator[Session]:
     """A streaming session with the caller's LLM (settings found exactly as for judge())."""
     from .client import _MODES, _settings
@@ -74,13 +78,15 @@ async def astream(checks: dict[str, Any], *, text: str = "", model: str | None =
         engine = Engine(settings, client)
         engine._detected = _MODES.setdefault((settings.backend_url, spec.backend_model), {})
         spec = await apply_effort(engine, spec, effort)
-        yield Session(engine, spec, checks, min_probability=min_probability, text=text)
+        yield Session(engine, spec, checks, min_probability=min_probability, text=text,
+                      reasoning=reasoning, escalate_below=escalate_below)
 
 
 async def run_socket(receive, send, engine: Engine, resolve_spec) -> None:
     """The /v1/stream protocol, independent of the web framework.
 
-    client -> {"type": "start", "checks": {...}, "model"?, "effort"?, "min_probability"?, "text"?, "emit"?: "all"|"changes"}
+    client -> {"type": "start", "checks": {...}, "model"?, "effort"?, "min_probability"?, "reasoning"?, "escalate_below"?,
+               "text"?, "emit"?: "all"|"changes"}
     client -> {"type": "append", "text": "..."}            (any number)
     client -> {"type": "end"}                              (judges what is pending, then closes)
     server -> {"type": "ready"} | {"type": "decision", ...Session.append result} | {"type": "error", "code", "message"}
@@ -97,7 +103,8 @@ async def run_socket(receive, send, engine: Engine, resolve_spec) -> None:
             raise HunchError(400, "invalid_request", "`emit` must be all or changes")
         spec = await apply_effort(engine, resolve_spec(start.get("model")), start.get("effort"))
         session = Session(engine, spec, start.get("checks") or {}, min_probability=start.get("min_probability"),
-                          text=str(start.get("text") or ""))
+                          text=str(start.get("text") or ""), reasoning=start.get("reasoning"),
+                          escalate_below=start.get("escalate_below"))
     except HunchError as e:
         await send({"type": "error", "code": e.code, "message": e.message})
         return

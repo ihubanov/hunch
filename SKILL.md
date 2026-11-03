@@ -51,6 +51,13 @@ except `sort` also has `answer` and `probability`; add `"min_probability": 0.9` 
 request) and `answer` is `null` whenever the model is less sure than that. `model` is optional and
 defaults to the server's configured model.
 
+## Think only when unsure
+
+Add `"reasoning": "auto"` when some questions may need working out (totals, dates, rule chains). Every check
+answers in one token. The model thinks only when that answer is under `escalate_below` (0.9), or when a
+one-token pre-check says the answer must be computed. On a mixed benchmark it kept always-thinking accuracy
+with half the output tokens. Use it only with a model whose one-token mode qualifies; otherwise use `"on"`.
+
 ## Extraction
 
 `from hunch import extract; extract(text, fields, now="2026-11-03")`, `python -m hunch extract '<json>'`,

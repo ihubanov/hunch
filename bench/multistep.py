@@ -63,15 +63,15 @@ async def run(args) -> int:
     if args.effort:
         os.environ["HUNCH_EFFORT"] = args.effort
     sem = asyncio.Semaphore(args.concurrency)
-    preds, lat, tokens, errors = {}, [], [0, 0], 0
+    preds, lat, tokens, errors, escalated = {}, [], [0, 0], 0, 0
 
     async def one(item):
-        nonlocal errors
+        nonlocal errors, escalated
         async with sem:
             t0 = time.perf_counter()
             try:
                 r = await ajudge(item["state"], {"d": to_check(item)}, base_url=args.base_url, model=args.model,
-                                 api_key=args.api_key)
+                                 api_key=args.api_key, reasoning=args.reasoning, escalate_below=args.escalate_below)
             except HunchError as e:
                 errors += 1
                 print(f"  {item['id']}: {e.code}: {e.message[:120]}", file=sys.stderr)
@@ -80,6 +80,7 @@ async def run(args) -> int:
             tokens[0] += r["usage"]["prompt_tokens"]
             tokens[1] += r["usage"]["completion_tokens"]
             preds[item["id"]] = to_prediction(item, r["results"]["d"])
+            escalated += bool(r["results"]["d"].get("reasoned"))
 
     t0 = time.perf_counter()
     await asyncio.gather(*[one(it) for it in items])
@@ -97,7 +98,8 @@ async def run(args) -> int:
         ok = it["id"] in preds and preds[it["id"]]["answer"] == it["expected"]
         by_fam.setdefault(it["family"], []).append(ok)
     report = {
-        "model": args.model, "mode": args.mode or "auto", "effort": args.effort, "n": len(items),
+        "model": args.model, "mode": args.mode or "auto", "effort": args.effort, "reasoning": args.reasoning,
+        "escalate_below": args.escalate_below, "n": len(items), "thought_on": escalated,
         "accuracy": round(right / len(items), 4), "correct": right, "errors": errors,
         "ece": round(ece(calib), 4) if calib else None,
         "p50_s": round(statistics.median(lat), 3) if lat else None,
@@ -119,6 +121,8 @@ def main() -> int:
     ap.add_argument("--model", default=os.environ.get("HUNCH_BACKEND_MODEL"))
     ap.add_argument("--mode", choices=["one_token", "deliberate", "auto", "sample"])
     ap.add_argument("--effort", help="reasoning effort in deliberate mode, e.g. low")
+    ap.add_argument("--reasoning", choices=["off", "on", "auto"], help="auto: one token first, think only when unsure")
+    ap.add_argument("--escalate-below", type=float, help="with --reasoning auto (default 0.9)")
     ap.add_argument("--concurrency", type=int, default=4, help="items in flight (keep modest on a shared server)")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--out", help="write predictions here, in the benchmark's own format")

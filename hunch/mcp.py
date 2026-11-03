@@ -48,6 +48,10 @@ JUDGE_TOOL = {
             "model": {"type": "string", "description": "Backend model id; default: the agent's configured model."},
             "effort": {"type": "string", "description": "Thinking effort for thinking models: low | high | max."},
             "min_probability": {"type": "number", "description": "Answers below this probability come back null."},
+            "reasoning": {"type": "string", "enum": ["off", "on", "auto"], "description": (
+                "auto: answer in one token, think only on checks under escalate_below (default 0.9). "
+                "Use auto for questions whose answer must be worked out (totals, rule chains, dates).")},
+            "escalate_below": {"type": "number"},
         },
         "required": ["checks"],
     },
@@ -107,7 +111,8 @@ def handle(msg: dict) -> dict | None:
             else:
                 out = judge(args.get("context", ""), args.get("checks"), images=args.get("images"),
                             model=args.get("model"), effort=args.get("effort"),
-                            min_probability=args.get("min_probability"))
+                            min_probability=args.get("min_probability"), reasoning=args.get("reasoning"),
+                            escalate_below=args.get("escalate_below"))
         except HunchError as e:
             # a tool error the agent can read and act on, not a protocol error
             return {"isError": True, "content": [{"type": "text", "text": f"{e.code}: {e.message}"}]}

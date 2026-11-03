@@ -33,6 +33,16 @@ class JudgeRequest(BaseModel):
     effort: str | None = None
     # Answers whose probability is under this come back as `answer: null` (per check: `min_probability`).
     min_probability: float | None = None
+    # "off": answer in one token. "on": think first. "auto": one token first, and think only for the checks
+    # whose probability is under `escalate_below` (default 0.9). Omitted: the model's configured mode.
+    reasoning: str | None = None
+    escalate_below: float | None = None
+
+
+def reasoning_summary(results: dict, reasoning: str | None) -> dict:
+    if reasoning is None:
+        return {}
+    return {"reasoning": reasoning, "escalated": [cid for cid, r in results.items() if r.get("reasoned")]}
 
 
 class ExtractRequest(BaseModel):
@@ -56,9 +66,9 @@ def parse_now(now: str | None) -> dt.date:
         raise HunchError(400, "invalid_request", f"`now` must be a date, YYYY-MM-DD: {e}") from e
 
 
-def check_floor(mp: float | None) -> None:
+def check_floor(mp: float | None, name: str = "min_probability") -> None:
     if mp is not None and not 0 <= mp <= 1:
-        raise HunchError(400, "invalid_request", "`min_probability` must be a number in [0, 1]")
+        raise HunchError(400, "invalid_request", f"`{name}` must be a number in [0, 1]")
 
 
 def _error(status: int, code: str, message: str) -> JSONResponse:
@@ -101,9 +111,11 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
         checks = validate_checks(req.checks, engine.max_options)
         validate_images(req.images)
         check_floor(req.min_probability)
+        check_floor(req.escalate_below, "escalate_below")
         t0 = time.perf_counter()
-        results, usage = await engine.judge(spec, req.context, checks, req.images, req.min_probability)
-        return {"model": spec.name, "results": results,
+        results, usage = await engine.judge(spec, req.context, checks, req.images, req.min_probability,
+                                            reasoning=req.reasoning, escalate_below=req.escalate_below)
+        return {"model": spec.name, "results": results, **reasoning_summary(results, req.reasoning),
                 "usage": {"prompt_tokens": usage.prompt_tokens, "completion_tokens": usage.completion_tokens,
                           "backend_calls": usage.backend_calls},
                 "latency_ms": round((time.perf_counter() - t0) * 1000),

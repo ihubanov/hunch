@@ -54,6 +54,7 @@ Everything from 1.x works unchanged; 2.0 adds to the response and adds endpoints
 | Extraction | — | `POST /v1/extract`, `hunch.extract()`: typed, grounded fields with offsets and probabilities |
 | Streaming | — | `WS /v1/stream`, `hunch.astream()`: re-judge as text arrives, report flips |
 | Backends | vLLM-style (constrained choice + logprobs) | + any OpenAI-compatible chat API (mode `sample`) |
+| Thinking | per model (`mode`) | + per request: `reasoning: off / on / auto`; `auto` thinks only when unsure (2.1) |
 | MCP | `judge` | `judge`, `extract` |
 
 The one behaviour change: zero-config discovery used to refuse an endpoint known to return no logprobs
@@ -159,6 +160,8 @@ model qualifies, and `--json FILE` writes the full report. `--quick` does one na
 | `model` | string, optional | One of the configured models; defaults to `service.default_model` |
 | `effort` | string, optional | Thinking effort for a `deliberate` model on this call only (`low` / `high` / `max`). Ignored for `one_token` models (it would switch thinking on) and by backends without it. In `hunch.toml`, `effort` requires `mode = "deliberate"` or `"auto"` |
 | `min_probability` | number 0–1, optional | Any answer whose `probability` is below this comes back as `answer: null`. A check's own `min_probability` overrides it |
+| `reasoning` | `off` / `on` / `auto`, optional | `off`: answer in one token. `on`: think first, then answer. `auto`: answer in one token and think only when needed — see [Think only when unsure](#think-only-when-unsure). Omitted: the model's configured `mode` |
+| `escalate_below` | number 0–1, optional | With `reasoning: "auto"`, think on any check whose one-token `probability` is below this (default 0.9) |
 
 Check kinds:
 
@@ -174,6 +177,38 @@ Every result also has `answer` and `probability`: `yesno` → `"yes"`/`"no"` and
 `pick` → the key; `scale` → the most likely level index; `tags` → the tag list, with the least certain tag's
 probability. Any check may carry `min_probability`; under it `answer` is `null` and the other fields are unchanged,
 so you can still see how close the call was. `sort` has no `answer`/`probability`.
+
+### Think only when unsure
+
+`"reasoning": "auto"` gives you one-token speed on the questions that don't need thought and a thinking model's
+accuracy on the ones that do. Every check is answered in one token, and next to it, on the same cached context,
+a one-token pre-check asks whether the answer can be read straight from the context or has to be worked out
+(arithmetic, counting, dates, a chain of rules). The model thinks, in deliberate mode, only when the one-token
+answer is under `escalate_below` (default 0.9) **or** the pre-check says it has to be worked out. Each result
+says `"reasoned": true/false` (with `fast_probability` and `needs_steps` when it thought), and the response lists
+the `escalated` checks.
+
+The pre-check is what makes this safe: confidence alone misses one-pass answers that are confidently wrong on a
+computed question. On the multistep set, confidence-only `auto` scored 99/100 with Qwen3.8 and 87/100 with
+DeepSeek-V4.1; with the pre-check, both scored 100/100.
+
+Measured on a mixed workload: the 240 look-alike judgments (the answer is in the text) plus the 100
+[multistep decisions](#multistep-decisions-public-benchmark) (it has to be worked out), Qwen3.8-Flash-Next,
+concurrency 6:
+
+| `reasoning` | Correct (of 340) | Thought on | Output tokens / item | p50 |
+| --- | --- | --- | --- | --- |
+| `off` | 303 | 0 | 1 | 0.63 s |
+| `on` | 338 | 340 | 170 | 1.59 s |
+| **`auto`** | **338** (338 on a rerun) | 12 look-alikes + 99 multistep | **78** | **0.95 s** |
+
+Same accuracy as always thinking, at under half the output tokens. Input tokens roughly double (the pre-check
+is a second one-token call), but it shares the cached context, so on your own server it costs little.
+
+Use `auto` only with a model whose **one-token** mode qualifies (`python -m hunch qualify`). A model whose
+one-token answers are confidently wrong skips thinking exactly where it needs it: DeepSeek-V4.1-Flash, whose
+one-token mode fails calibration, got 204/240 on the look-alikes with thinking off and 315/340 overall with
+`auto`, against 335 with `reasoning: "on"`. For such a model, use `on` (or `mode = "deliberate"`).
 
 ### `POST /v1/extract`
 

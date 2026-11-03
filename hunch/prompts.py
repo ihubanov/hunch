@@ -106,3 +106,14 @@ def sort_item(question: Any, item: Any, levels: list[Any]) -> str:
     lines += [f"{i}) {render(desc)}" for i, desc in enumerate(levels)]
     lines.append("Reply with exactly one digit: the level that fits ITEM best.")
     return "\n".join(lines)
+
+
+def needs_steps_check(check: dict) -> dict:
+    """reasoning="auto": a yes/no pre-check, asked in one token next to the check itself, of whether its
+    answer can be read straight from CONTEXT. "No" means it must be worked out, so the model thinks."""
+    q = check.get("question")
+    about = f'this question about CONTEXT: "{render(q)}"' if q not in (None, "") else "the question about CONTEXT"
+    return {"question": f"To answer {about} -- can the answer be read directly from CONTEXT, without arithmetic, "
+                        "counting, comparing dates or times, or tracking a sequence of steps or rules?",
+            "yes_if": "the answer is stated or follows at a glance",
+            "no_if": "it has to be computed, counted, or worked through step by step"}

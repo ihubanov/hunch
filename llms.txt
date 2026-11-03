@@ -14,6 +14,7 @@
 - Endpoint: `POST /v1/judge` with `context` (string, object or array), `checks` (your ids -> check), and optional `images` (up to 8 http(s) or data: URLs, for vision models).
 - Check kinds: `yesno` (-> `p_yes`), `pick` (1-300 options -> `pick`, `probs`, `confidence`), `scale` (1-10 ordered levels -> `value`, `probs`, `confidence`), `tags` (multi-label -> `tags`, `probs`), `sort` (items by a criterion -> `order`, `scores`). Every result has `answer` + `probability`; `answer` is null under `min_probability`.
 - Extraction: `POST /v1/extract` / `hunch.extract(text, fields)` -> per field `value`, `text`, `start`/`end` (offsets in the source), `probability`, `status` (found / absent / unsure / ungrounded / unparsed). Types: text, number, money, date, time, duration.
+- Thinking per request: `reasoning: off | on | auto`. `auto` answers in one token and thinks only when unsure or when the answer must be worked out (same accuracy as always thinking on a mixed benchmark, half the output tokens).
 - Streaming: `WS /v1/stream` / `hunch.astream(checks)`: append text, get re-judged results and the ids whose answer flipped.
 - No logprobs (hosted APIs): mode `sample`, several votes per decision (automatic for api.anthropic.com).
 - Also: `GET /v1/models`, `GET /health`, `python -m hunch selftest`, `python -m hunch qualify <model>`.
