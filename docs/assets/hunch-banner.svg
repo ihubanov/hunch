@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1020"/>
+      <stop offset="1" stop-color="#111a2e"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.78" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#2dd4bf" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#2dd4bf" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#ffffff" stroke-opacity="0.035" stroke-width="1"/>
+    </pattern>
+    <linearGradient id="bar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#14b8a6"/>
+      <stop offset="1" stop-color="#5eead4"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <rect width="1280" height="640" fill="url(#grid)"/>
+  <rect width="1280" height="640" fill="url(#glow)"/>
+
+  <!-- left: name + hook -->
+  <text x="100" y="150" font-family="DejaVu Sans Mono" font-size="24" fill="#5eead4" letter-spacing="1">open source · runs on your own LLM</text>
+  <text x="92" y="300" font-family="Roboto" font-weight="900" font-size="168" fill="#f8fafc" letter-spacing="-4">hunch</text>
+  <text x="100" y="378" font-family="Roboto" font-weight="500" font-size="44" fill="#e2e8f0">Calibrated decisions</text>
+  <text x="100" y="432" font-family="Roboto" font-weight="500" font-size="44" fill="#e2e8f0">from the model you run.</text>
+
+  <!-- chips -->
+  <g font-family="DejaVu Sans Mono" font-size="26" fill="#0b1020" font-weight="bold">
+    <rect x="100" y="482" width="138" height="48" rx="24" fill="#5eead4"/>
+    <text x="169" y="515" text-anchor="middle">decide</text>
+    <rect x="254" y="482" width="150" height="48" rx="24" fill="#a5b4fc"/>
+    <text x="329" y="515" text-anchor="middle">extract</text>
+    <rect x="420" y="482" width="140" height="48" rx="24" fill="#fcd34d"/>
+    <text x="490" y="515" text-anchor="middle">stream</text>
+  </g>
+
+  <!-- right: the idea card -->
+  <rect x="660" y="96" width="530" height="448" rx="22" fill="#0f172a" stroke="#334155" stroke-width="2"/>
+  <circle cx="694" cy="126" r="7" fill="#f87171"/><circle cx="716" cy="126" r="7" fill="#fbbf24"/><circle cx="738" cy="126" r="7" fill="#34d399"/>
+
+  <text x="692" y="186" font-family="DejaVu Sans Mono" font-size="20" fill="#94a3b8">"Charged twice. Fix it or I cancel."</text>
+  <text x="692" y="232" font-family="Roboto" font-weight="500" font-size="30" fill="#f1f5f9">Asking for a refund?</text>
+
+  <!-- arrow -->
+  <path d="M925 258 V300" stroke="#5eead4" stroke-width="4" stroke-linecap="round"/>
+  <path d="M912 290 L925 306 L938 290" fill="none" stroke="#5eead4" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <text x="692" y="392" font-family="DejaVu Sans Mono" font-weight="bold" font-size="76" fill="#5eead4">p = 0.97</text>
+
+  <!-- distribution bars -->
+  <g font-family="DejaVu Sans Mono" font-size="22" fill="#cbd5e1">
+    <text x="692" y="446">yes</text>
+    <rect x="748" y="428" width="380" height="22" rx="11" fill="#1e293b"/>
+    <rect x="748" y="428" width="369" height="22" rx="11" fill="url(#bar)"/>
+    <text x="692" y="486">no</text>
+    <rect x="748" y="468" width="380" height="22" rx="11" fill="#1e293b"/>
+    <rect x="748" y="468" width="14" height="22" rx="7" fill="#64748b"/>
+  </g>
+  <text x="692" y="526" font-family="DejaVu Sans Mono" font-size="20" fill="#64748b">1 token · read off the logprobs</text>
+</svg>

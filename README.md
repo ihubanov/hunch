@@ -1,3 +1,5 @@
+<p align="center"><img src="https://raw.githubusercontent.com/ihubanov/hunch/main/docs/assets/hunch-banner.png" alt="hunch: calibrated decisions from the model you run. A customer message and the question &quot;Asking for a refund?&quot; go in; p = 0.97 comes out, read off the logprobs of one token. Decide, extract, stream." width="100%"></p>
+
 # Hunch
 
 **Calibrated decisions, source-grounded extraction and streaming decisions from your own LLMs — on text and on
