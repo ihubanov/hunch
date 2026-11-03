@@ -323,8 +323,8 @@ def test_qualify_backend_down_is_unavailable_not_a_verdict():
 
 def test_package_version_matches_pyproject():
     import pathlib
-    import tomllib
     import hunch
+    from hunch.config import tomllib   # tomllib on 3.11+, the tomli backport on 3.10
     pyproject = tomllib.loads((pathlib.Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
     assert pyproject["project"]["version"] == hunch.__version__
     assert pyproject["tool"]["setuptools"]["packages"] == ["hunch"]  # bench/ and deploy/ must not be packaged
@@ -516,7 +516,6 @@ def test_constraint_probe_gives_a_thinking_model_room():
 
 def test_effort_is_configurable_per_model_and_per_request():
     import asyncio
-    import tomllib  # noqa: F401  (config path is exercised via ModelSpec directly)
 
     # per model: `effort` is sugar for extra_body.reasoning_effort
     from hunch.config import ModelSpec, load_settings
