@@ -1,4 +1,4 @@
-"""Hunch as a library: judge with the LLM the caller already uses, no server and no hunch.toml.
+"""Hunch as a library: judge, extract and stream with the LLM the caller already uses, no server, no hunch.toml.
 
     from hunch import judge
     r = judge({"ticket": "Charged twice, fix it or I cancel."},
@@ -18,13 +18,15 @@ Settings, first match wins:
   mode without any setting. HUNCH_MODE / HUNCH_EFFORT override it *in this discovered path only*; with a
   hunch.toml they are ignored, because `mode` and `effort` are per model in the file.
 
-The endpoint must be an OpenAI-compatible vLLM server: Hunch reads token logprobs under a constrained
-choice, which hosted APIs without logprobs cannot provide. A missing capability is reported up front.
+The endpoint is any OpenAI-compatible server. On vLLM (or anything that returns token logprobs under a
+constrained choice) each answer is read off one token's logprobs. Hosted APIs without logprobs run in
+mode "sample" (set automatically for api.anthropic.com, or HUNCH_MODE=sample): several votes per check.
 """
 from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import datetime as dt
 import os
 import pathlib
 from typing import Any
@@ -57,8 +59,9 @@ async def _settings(base_url: str | None, api_key: str | None, model: str | None
 
 
 async def ajudge(context: Any = "", checks: dict[str, Any] | None = None, *, images: list[str] | None = None,
-                 model: str | None = None, effort: str | None = None, base_url: str | None = None,
-                 api_key: str | None = None, transport: httpx.AsyncBaseTransport | None = None) -> dict:
+                 model: str | None = None, effort: str | None = None, min_probability: float | None = None,
+                 base_url: str | None = None, api_key: str | None = None,
+                 transport: httpx.AsyncBaseTransport | None = None) -> dict:
     """Async version of judge(). Returns {"model", "results", "usage"}; raises HunchError."""
     if not checks:
         raise HunchError(400, "invalid_request", "`checks` must contain at least one check")
@@ -70,7 +73,7 @@ async def ajudge(context: Any = "", checks: dict[str, Any] | None = None, *, ima
         engine._detected = _MODES.setdefault((settings.backend_url, spec.backend_model), {})
         checks = validate_checks(checks, engine.max_options)
         spec = await apply_effort(engine, spec, effort)
-        results, usage = await engine.judge(spec, context, checks, images)
+        results, usage = await engine.judge(spec, context, checks, images, min_probability)
         info = await run_info(engine, spec, effort)
     return {"model": spec.backend_model, "results": results,
             "usage": {"prompt_tokens": usage.prompt_tokens, "completion_tokens": usage.completion_tokens,
@@ -82,7 +85,42 @@ def judge(context: Any = "", checks: dict[str, Any] | None = None, **kwargs: Any
 
     Safe to call from code that already runs an event loop: it then runs on a worker thread.
     """
-    coro = ajudge(context, checks, **kwargs)
+    return _run(ajudge(context, checks, **kwargs))
+
+
+async def aextract(context: Any, fields: dict[str, Any], *, model: str | None = None, effort: str | None = None,
+                   min_probability: float | None = None, now: dt.date | str | None = None,
+                   base_url: str | None = None, api_key: str | None = None,
+                   transport: httpx.AsyncBaseTransport | None = None) -> dict:
+    """Async version of extract(). Returns {"model", "results", "usage", "mode", ...}; raises HunchError."""
+    from .extraction import extract as run_extract
+    if isinstance(now, str):
+        now = dt.date.fromisoformat(now[:10])
+    settings, spec = await _settings(base_url, api_key, model)
+    async with httpx.AsyncClient(**({"transport": transport} if transport is not None else {})) as client:
+        engine = Engine(settings, client)
+        engine._detected = _MODES.setdefault((settings.backend_url, spec.backend_model), {})
+        spec = await apply_effort(engine, spec, effort)
+        results, usage = await run_extract(engine, spec, context, fields, min_probability=min_probability,
+                                           now=now or dt.datetime.now(dt.timezone.utc).date())
+        info = await run_info(engine, spec, effort)
+    return {"model": spec.backend_model, "results": results,
+            "usage": {"prompt_tokens": usage.prompt_tokens, "completion_tokens": usage.completion_tokens,
+                      "backend_calls": usage.backend_calls}, **info}
+
+
+def extract(context: Any, fields: dict[str, Any], **kwargs: Any) -> dict:
+    """Pull typed, source-grounded fields out of `context` with the caller's LLM. Blocking.
+
+        extract("Midsize SUV, pickup 5pm tomorrow, up to $450 a month.",
+                {"vehicle": "the vehicle asked for", "pickup": {"type": "time"}, "budget": {"type": "money"}})
+
+    Each field: {"value", "text", "start", "end", "probability", "status"}; see hunch.extraction.
+    """
+    return _run(aextract(context, fields, **kwargs))
+
+
+def _run(coro):
     try:
         asyncio.get_running_loop()
     except RuntimeError:

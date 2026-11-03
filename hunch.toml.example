@@ -36,6 +36,16 @@ mode = "deliberate"
 effort = "low"
 # debias = true        # for a model that has no thinking mode: ask both answer orders and average (2x calls)
 
+# A hosted chat API without token logprobs: each decision is `samples` votes instead of one logprob read.
+# [models.hosted]
+# backend_model = "some-hosted-model"
+# mode = "sample"
+# samples = 7              # probability moves in 1/samples steps; each vote costs a full prompt
+# sample_temperature = 1.0
+# extra_body = {}          # send no vLLM-only fields to a hosted API
+#
+# extract_max_tokens = 1024   # per model: cap on the JSON answer of /v1/extract
+
 # Per-model extra request fields (default: {"reasoning_effort": "none"}), e.g. for chat templates:
 # [models.qwen.extra_body]
 # reasoning_effort = "none"

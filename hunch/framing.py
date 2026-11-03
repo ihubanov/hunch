@@ -72,8 +72,10 @@ def _expand(checks: dict[str, Any]) -> tuple[dict[str, dict], dict[str, tuple[li
     return engine, plan
 
 
-def _combine(plan: dict[str, tuple[list[tuple[str, int]], bool]], raw: dict[str, dict], swing_gate: float) -> dict:
-    """Fold sibling framings back into one result per parent: consensus p_yes, per-framing views, swing, flag."""
+def _combine(plan: dict[str, tuple[list[tuple[str, int]], bool]], raw: dict[str, dict], swing_gate: float,
+             floors: dict[str, float | None] | None = None) -> dict:
+    """Fold sibling framings back into one result per parent: consensus p_yes, per-framing views, swing, flag.
+    Framed parents get the same `answer` / `probability` pair as every other result (null under its floor)."""
     out: dict[str, dict] = {}
     for name, (subs, framed) in plan.items():
         if not framed:
@@ -83,8 +85,11 @@ def _combine(plan: dict[str, tuple[list[tuple[str, int]], bool]], raw: dict[str,
         vals = list(views.values())
         consensus = sum(vals) / len(vals)
         swing = max(vals) - min(vals) if len(vals) > 1 else 0.0
+        answer, prob = ("yes", consensus) if consensus >= 0.5 else ("no", 1 - consensus)
+        floor = (floors or {}).get(name)
         out[name] = {"kind": "yesno", "p_yes": round(consensus, 4), "swing": round(swing, 4),
-                     "framing_flag": swing > swing_gate, "views": {s: round(v, 4) for s, v in views.items()}}
+                     "framing_flag": swing > swing_gate, "views": {s: round(v, 4) for s, v in views.items()},
+                     "answer": None if floor is not None and prob < floor else answer, "probability": round(prob, 4)}
     return out
 
 
@@ -97,7 +102,9 @@ async def ajudge_framed(context: Any = "", checks: dict[str, Any] | None = None,
         return await ajudge(context, checks, **kw)     # let ajudge raise the standard empty-checks error
     engine_checks, plan = _expand(checks)
     r = await ajudge(context, engine_checks, **kw)
-    return {**{k: v for k, v in r.items() if k != "results"}, "results": _combine(plan, r["results"], swing_gate)}
+    floors = {n: (c.get("min_probability", kw.get("min_probability")) if isinstance(c, dict) else None)
+              for n, c in checks.items()}
+    return {**{k: v for k, v in r.items() if k != "results"}, "results": _combine(plan, r["results"], swing_gate, floors)}
 
 
 def judge_framed(context: Any = "", checks: dict[str, Any] | None = None, *, swing_gate: float = 0.25, **kw: Any) -> dict:

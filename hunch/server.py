@@ -1,12 +1,13 @@
-"""Hunch HTTP API: POST /v1/judge, GET /v1/models, GET /health."""
+"""Hunch HTTP API: POST /v1/judge, POST /v1/extract, WS /v1/stream, GET /v1/models, GET /health."""
 from __future__ import annotations
 
+import datetime as dt
 import time
 from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import Depends, FastAPI, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
@@ -15,6 +16,8 @@ from . import __version__
 from .config import Settings, load_settings
 
 from .engine import THINKING_OFF_EFFORTS, Engine, HunchError, apply_effort, run_info, validate_checks, validate_images
+from .extraction import extract as run_extract
+from .stream import run_socket
 
 
 class JudgeRequest(BaseModel):
@@ -28,6 +31,34 @@ class JudgeRequest(BaseModel):
     # Per-request thinking effort for deliberate-mode models ("low" / "high" / "max"): trade cost for
     # stability on this call only. Ignored by backends that don't support it.
     effort: str | None = None
+    # Answers whose probability is under this come back as `answer: null` (per check: `min_probability`).
+    min_probability: float | None = None
+
+
+class ExtractRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    context: str | dict[str, Any] | list[Any]
+    # name -> description | [description] (a list of mentions) | {description, type, many, min_probability}
+    fields: dict[str, Any]
+    model: str | None = None
+    effort: str | None = None
+    min_probability: float | None = None
+    # The reference date for relative dates ("tomorrow", "next Friday"), YYYY-MM-DD. Default: today (UTC).
+    now: str | None = None
+
+
+def parse_now(now: str | None) -> dt.date:
+    if now is None:
+        return dt.datetime.now(dt.timezone.utc).date()
+    try:
+        return dt.date.fromisoformat(now[:10])
+    except ValueError as e:
+        raise HunchError(400, "invalid_request", f"`now` must be a date, YYYY-MM-DD: {e}") from e
+
+
+def check_floor(mp: float | None) -> None:
+    if mp is not None and not 0 <= mp <= 1:
+        raise HunchError(400, "invalid_request", "`min_probability` must be a number in [0, 1]")
 
 
 def _error(status: int, code: str, message: str) -> JSONResponse:
@@ -69,13 +100,53 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
         spec = await apply_effort(engine, spec, req.effort)
         checks = validate_checks(req.checks, engine.max_options)
         validate_images(req.images)
+        check_floor(req.min_probability)
         t0 = time.perf_counter()
-        results, usage = await engine.judge(spec, req.context, checks, req.images)
+        results, usage = await engine.judge(spec, req.context, checks, req.images, req.min_probability)
         return {"model": spec.name, "results": results,
                 "usage": {"prompt_tokens": usage.prompt_tokens, "completion_tokens": usage.completion_tokens,
                           "backend_calls": usage.backend_calls},
                 "latency_ms": round((time.perf_counter() - t0) * 1000),
                 **await run_info(engine, spec, req.effort)}
+
+    @app.post("/v1/extract", dependencies=[Depends(auth)])
+    async def extract(req: ExtractRequest, request: Request):
+        engine: Engine = request.app.state.engine
+        spec = settings.resolve(req.model)
+        if spec is None:
+            raise HunchError(400, "unknown_model", f"unknown model {req.model!r}; configured: {sorted(settings.models)}")
+        spec = await apply_effort(engine, spec, req.effort)
+        check_floor(req.min_probability)
+        now = parse_now(req.now)
+        t0 = time.perf_counter()
+        results, usage = await run_extract(engine, spec, req.context, req.fields, min_probability=req.min_probability, now=now)
+        return {"model": spec.name, "results": results,
+                "usage": {"prompt_tokens": usage.prompt_tokens, "completion_tokens": usage.completion_tokens,
+                          "backend_calls": usage.backend_calls},
+                "latency_ms": round((time.perf_counter() - t0) * 1000),
+                **await run_info(engine, spec, req.effort)}
+
+    @app.websocket("/v1/stream")
+    async def stream(ws: WebSocket):
+        # Browsers can't set headers on a WebSocket, so the key may also come as ?api_key=
+        key = (ws.headers.get("authorization") or "").removeprefix("Bearer ").strip() or ws.query_params.get("api_key", "")
+        await ws.accept()
+        if settings.api_keys and key not in settings.api_keys:
+            await ws.send_json({"type": "error", "code": "unauthorized", "message": "invalid or missing API key"})
+            await ws.close(code=1008)
+            return
+
+        def resolve(name):
+            spec = settings.resolve(name)
+            if spec is None:
+                raise HunchError(400, "unknown_model", f"unknown model {name!r}; configured: {sorted(settings.models)}")
+            return spec
+
+        try:
+            await run_socket(ws.receive_json, ws.send_json, ws.app.state.engine, resolve)
+            await ws.close()
+        except (WebSocketDisconnect, RuntimeError):
+            pass   # the client left; nothing to tell it
 
     @app.get("/v1/models", dependencies=[Depends(auth)])
     async def models(request: Request):

@@ -1,6 +1,12 @@
 # Hunch
 
-**Calibrated yes/no, pick-one and scale judgments from your own LLMs — on text and on images — read straight off the logprobs.**
+**Calibrated decisions, source-grounded extraction and streaming decisions from your own LLMs — on text and on
+images — read straight off the logprobs.**
+
+Hunch 2.0 turns the model you already run into a decision-and-extraction API: typed answers with a probability,
+`null` when the model isn't sure, fields copied out of the text with the exact span they came from, and decisions
+that update as a conversation grows. One output token per decision. No new model, no subscription. See
+[What's new in 2.0](#whats-new-in-20).
 
 A lot of code needs a small judgment that plain logic can't express: *is this message asking for a refund?
 Which team should handle this ticket? How severe is this alert? Does this new fact replace the old one?*
@@ -15,8 +21,14 @@ on fire vs one lit by fireworks), four vision models qualify, one of them a 4-bi
 0.016. See [Images](#images).
 
 - **Typed checks:** `yesno` → `p_yes`, `pick` (one of up to 300 options) → the best option and a full
-  distribution, `scale` (up to 10 ordered levels) → an expected value and a distribution. Every answer carries a
-  `confidence`.
+  distribution, `scale` (up to 10 ordered levels) → an expected value and a distribution, `tags` (multi-label)
+  and `sort` (order items by a criterion). Every result also carries a uniform `answer` and `probability`, and
+  `answer` is `null` when the probability is under your `min_probability`.
+- **Extraction:** `POST /v1/extract` / `hunch.extract()` pulls typed fields (text, number, money, date, time,
+  duration) out of text. Each field has a probability, the character offsets it was copied from, and a status. A value
+  the model wrote that is not in the source is never returned.
+- **Streaming decisions:** a WebSocket (`/v1/stream`) or `hunch.astream()` session re-judges the checks as text is
+  appended and tells you which answers just flipped. The prefix cache makes each update cost about the new text.
 - **No text generation.** Each check is a single constrained output token (`max_tokens: 1`), and the answer
   is read from the token logprobs and renormalised over the allowed labels. The model can't ramble, and a
   malformed answer can't make it into your code.
@@ -27,6 +39,25 @@ on fire vs one lit by fireworks), four vision models qualify, one of them a 4-bi
   server's prefix cache is reused.
 - **Your models, your hardware.** Hunch runs against any [vLLM](https://github.com/vllm-project/vllm)
   OpenAI-compatible server. No data leaves your network.
+- **Any chat API, too.** Hosted endpoints that give no token logprobs run in mode `sample`: each decision is a few
+  short votes, and the probability is the share of votes. Coarser and costlier than one logprob read, but it works
+  everywhere (see [Backends without logprobs](#backends-without-logprobs)).
+
+## What's new in 2.0
+
+Everything from 1.x works unchanged; 2.0 adds to the response and adds endpoints.
+
+| | 1.x | 2.0 |
+| --- | --- | --- |
+| Check kinds | `yesno`, `pick`, `scale` | + `tags` (multi-label), `sort` (items by a criterion) |
+| Every result | kind-specific fields | + `answer` and `probability`; `answer: null` under `min_probability` |
+| Extraction | — | `POST /v1/extract`, `hunch.extract()`: typed, grounded fields with offsets and probabilities |
+| Streaming | — | `WS /v1/stream`, `hunch.astream()`: re-judge as text arrives, report flips |
+| Backends | vLLM-style (constrained choice + logprobs) | + any OpenAI-compatible chat API (mode `sample`) |
+| MCP | `judge` | `judge`, `extract` |
+
+The one behaviour change: zero-config discovery used to refuse an endpoint known to return no logprobs
+(`api.anthropic.com`); it now uses it in mode `sample`.
 
 ## Quick start
 
@@ -127,6 +158,7 @@ model qualifies, and `--json FILE` writes the full report. `--quick` does one na
 | `images` | list of strings, optional | Up to 8 images for a vision model: `https://…` URLs the backend can fetch, or `data:image/…;base64,…` URLs. They are part of the context, numbered `IMAGE 1`…`IMAGE n` so questions can refer to them. `context` may be omitted when only images are judged |
 | `model` | string, optional | One of the configured models; defaults to `service.default_model` |
 | `effort` | string, optional | Thinking effort for a `deliberate` model on this call only (`low` / `high` / `max`). Ignored for `one_token` models (it would switch thinking on) and by backends without it. In `hunch.toml`, `effort` requires `mode = "deliberate"` or `"auto"` |
+| `min_probability` | number 0–1, optional | Any answer whose `probability` is below this comes back as `answer: null`. A check's own `min_probability` overrides it |
 
 Check kinds:
 
@@ -135,6 +167,100 @@ Check kinds:
 | `yesno` | `question`, optional `yes_if`, `no_if` | `p_yes` (0–1) |
 | `pick` | `question`, `options`: key → description or `null` (1–300 options) | `pick` (most likely key), `probs` (key → p), `confidence` |
 | `scale` | `question`, `levels`: list of descriptions, lowest first (1–10) | `value` (expected level, can fall between levels), `probs` (list), `confidence` |
+| `tags` | `question`, `tags`: key → description or `null` (1–50) | `tags` (keys at p ≥ 0.5), `probs` (key → p). Each tag is its own yes/no call, in parallel |
+| `sort` | `question` (the criterion), `items`: list or key → item (1–100), optional `order` (`desc` default, or `asc`), optional `levels` | `order` (keys, or list indices as strings), `scores` (expected rating 0–9 per item). The model rates each item; code sorts |
+
+Every result also has `answer` and `probability`: `yesno` → `"yes"`/`"no"` and the probability of that answer;
+`pick` → the key; `scale` → the most likely level index; `tags` → the tag list, with the least certain tag's
+probability. Any check may carry `min_probability`; under it `answer` is `null` and the other fields are unchanged,
+so you can still see how close the call was. `sort` has no `answer`/`probability`.
+
+### `POST /v1/extract`
+
+```bash
+curl -s localhost:8791/v1/extract -H 'content-type: application/json' -d '{
+  "context": "Hi, I'"'"'d like a midsize SUV picked up at 5pm tomorrow near the airport. Budget is up to $450 a month. Add a child seat and a GPS, no colour preference.",
+  "fields": {
+    "vehicle":  "the vehicle asked for",
+    "pickup":   {"type": "time"},
+    "day":      {"type": "date"},
+    "budget":   {"type": "money"},
+    "colour":   "paint colour",
+    "extras":   ["an extra asked for"],
+    "location": "pickup place"
+  },
+  "now": "2026-11-03"
+}'
+```
+
+A real response from Gemma-4-31B (one backend call, 280 prompt and 80 output tokens, offsets into `context`):
+
+```json
+{"results": {
+  "vehicle":  {"value": "midsize SUV", "text": "midsize SUV", "start": 15, "end": 26, "probability": 1.0, "status": "found"},
+  "pickup":   {"value": "17:00", "text": "5pm", "start": 40, "end": 43, "probability": 1.0, "status": "found"},
+  "day":      {"value": "2026-11-04", "text": "tomorrow", "start": 44, "end": 52, "probability": 1.0, "status": "found"},
+  "budget":   {"value": {"amount": 450, "currency": "USD"}, "text": "$450 a month", "start": 87, "end": 99, "probability": 0.8355, "status": "found"},
+  "colour":   {"value": null, "text": null, "start": null, "end": null, "probability": 1.0, "status": "absent"},
+  "extras":   {"items": [{"value": "child seat", "text": "child seat", "start": 107, "end": 117, "probability": 1.0, "status": "found"},
+                         {"value": "GPS", "text": "GPS", "start": 124, "end": 127, "probability": 1.0, "status": "found"}]},
+  "location": {"value": "near the airport", "text": "near the airport", "start": 53, "end": 69, "probability": 1.0, "status": "found"}
+}}
+```
+
+| Field | Type | |
+| --- | --- | --- |
+| `context` | string (an object is read as its JSON) | The text to read. Offsets refer to it |
+| `fields` | object: name → spec | `"description"`, `["description"]` (every mention, as a list), or `{"description", "type", "many", "min_probability"}` (up to 64 fields) |
+| `now` | `YYYY-MM-DD`, optional | Reference date for relative dates (`tomorrow`, `next Friday`, `in two weeks`). Default: today, UTC |
+| `min_probability`, `model`, `effort` | optional | As for `/v1/judge` |
+
+How it works: the model writes one JSON object under a JSON-schema constraint (`response_format`), copying each
+value **verbatim** from the context or writing `null`. Its job is copying, not interpreting. Code then:
+
+- scores each field as the product of the probabilities of the tokens that spell its value (the closing quote
+  included, so where the value ends counts too). For `null`, the probability measures how sure the model is that
+  the context doesn't say;
+- finds the span in the source (exact match, then case-insensitive, then any whitespace between words) and returns
+  `start` / `end`. A value that can't be found is returned as `status: "ungrounded"` with `value: null`;
+- parses the type from the source span: `number` (`"12k"` → 12000), `money` (`{"amount", "currency"}`; a bare `$` is
+  USD), `date` (ISO; `03/04/2026` is ambiguous and stays unparsed rather than guessed), `time` (`HH:MM`), `duration`
+  (seconds).
+
+`status` is `found`, `absent`, `unsure` (under `min_probability`), `ungrounded` or `unparsed` (the span is there but
+isn't a valid value of its type). Anything but `found` has `value: null`, so `if field["value"] is not None` is the
+only check your code needs. The backend must support `response_format: {"type": "json_schema"}` (vLLM does);
+`selftest` reports whether it does.
+
+### `WS /v1/stream`
+
+```text
+-> {"type": "start", "checks": {...}, "emit": "changes", "min_probability": 0.8}   (model, effort, text optional)
+<- {"type": "ready"}
+-> {"type": "append", "text": "Hi, I'm calling about my plan. "}
+<- {"type": "decision", "update": 1, "changed": ["cancel"], "results": {"cancel": {"answer": "no", ...}}, "chars": 31, ...}
+-> {"type": "append", "text": "Please cancel it today."}
+<- {"type": "decision", "update": 2, "changed": ["cancel"], "results": {"cancel": {"answer": "yes", ...}}, ...}
+-> {"type": "end"}
+```
+
+Every update re-judges all checks on the whole text so far. With `emit: "changes"` (the default) a decision is sent
+only when an answer flips, carrying just the flipped checks; `emit: "all"` sends every update in full. Appends that
+arrive while a judgment is running are merged into the next one, so every decision is about the newest text and
+work never piles up. Authenticate with `Authorization: Bearer …` or `?api_key=…` (browsers can't set WebSocket
+headers). In Python:
+
+```python
+from hunch import astream
+async with astream({"cancel": {"kind": "yesno", "question": "Does the caller want to cancel?"}}) as s:
+    for chunk in transcript:
+        u = await s.append(chunk)
+        if "cancel" in u["changed"] and u["results"]["cancel"]["answer"] == "yes":
+            route_to_retention()
+```
+
+Measured on Gemma-4-31B: a 4-turn call with one yes/no check and a 3-tag check (4 backend calls per update) took
+0.6–1.1 s per update, and `cancel` flipped to `yes` on the update that said so.
 
 `confidence` = 1 − normalised entropy of the distribution: 1.0 means all probability is on one answer, 0.0 means uniform.
 
@@ -142,11 +268,22 @@ Errors come back as `{"error": {"code": "...", "message": "..."}}`:
 
 | HTTP | `code` | When |
 | --- | --- | --- |
-| 400 | `invalid_request`, `unknown_model`, `too_many_options`, `too_many_levels`, `too_many_images`, `images_not_supported` (images sent to a text-only model) | Bad input (unknown fields are rejected) |
+| 400 | `invalid_request`, `unknown_model`, `too_many_options`, `too_many_levels`, `too_many_images`, `too_many_fields`, `images_not_supported` (images sent to a text-only model) | Bad input (unknown fields are rejected) |
 | 401 | `unauthorized` | `HUNCH_API_KEYS` is set and the bearer key is missing or wrong |
 | 413 | `context_too_long` | The context plus the question exceed the model's context window |
 | 502 | `backend_error` | The backend returned an error, or did **not** enforce the constraint (never turned into a made-up probability) |
 | 503 | `backend_unavailable` | Still failing after retries (429 / 5xx / timeouts, with `Retry-After` honoured) |
+
+### Backends without logprobs
+
+Hosted chat APIs that return no token logprobs can't be read the usual way. Set `mode = "sample"` for the model in
+`hunch.toml` (or `HUNCH_MODE=sample`; it is chosen automatically for `api.anthropic.com`). Each decision is then
+asked `samples` times (default 7, `HUNCH_SAMPLES`) at `sample_temperature` (default 1.0) with no constraint, the
+reply's first label is read leniently (`Y`, `Yes.`, `**B**`), and the probability is the share of votes. Extraction
+runs `samples` times too, and a field's probability is the share of samples that agree on it.
+
+The cost is real: probabilities move in 1/`samples` steps and every vote costs a full prompt (use the provider's
+prompt caching). Prefer a logprob backend when you have one. vLLM-only request fields are not sent in this mode.
 
 `GET /v1/models` lists the configured models, each with the `mode` its checks actually run in (`one_token` or
 `deliberate`; `auto` is resolved, with the configured value in `configured_mode`). `GET /health` checks that the backend serves them.
@@ -340,8 +477,8 @@ From the bundled benchmark (see [Measured](#measured)):
 
 ## When not to use Hunch
 
-- **Generating text** (summaries, replies, extraction of free-form values). Use a generative model, or have code
-  find candidates and let Hunch `pick`.
+- **Generating text** (summaries, replies, rewriting). Use a generative model. Extracting values that are *in*
+  the text is what `/v1/extract` is for; values that have to be composed are not.
 - **Arithmetic, counting, date comparison, exact matching.** Do it in code.
 - **Multi-step reasoning.** A check is a snap judgment over the context you give it. Split the problem, or use a
   reasoning model.
@@ -405,6 +542,28 @@ Why the others fail:
 - **GLM-5.3 in one-token mode:** it has no non-thinking mode, so its first token opens a scratchpad rather than
   answering. In `mode = "deliberate"` the same model qualifies at 97.5% with ECE 0.025. See
   [Models with no non-thinking mode](#models-with-no-non-thinking-mode).
+
+### Multistep decisions (public benchmark)
+
+[multistep_decisions](https://github.com/levantolabs/multistep_decisions) (MIT, v1.0, data sha256 `c4574401…`)
+is 100 typed decisions whose answer is not written in the text: it has to be constructed (a total carried across
+stock movements, a rule chain with a buried exception, business hours across time zones). It was built to show
+that a one-pass decision model has no scratchpad for that. Run with [`bench/multistep.py`](bench/multistep.py),
+scored with the benchmark's own `evaluate.py`, 2026-11-03, concurrency 4 against a shared vLLM server:
+
+| Model (NVFP4) | Mode | Correct | ECE | Brier | Output tokens / item | p50 |
+| --- | --- | --- | --- | --- | --- | --- |
+| DeepSeek-V4.1-Flash | deliberate | **100 / 100** (100 on a rerun) | 0.000 | 0.000 | 132 (119 on the rerun) | 1.7 s |
+| Qwen3.8-Flash-Next | deliberate | **100 / 100** (100 on a rerun) | 0.066 | 0.011 | 227 (225) | 2.4 s |
+| Gemma-4-31B | one_token | 74 / 100 | 0.242 | 0.495 | 1 | 0.65 s |
+| Qwen3.8-Flash-Next | one_token | 65 / 100 | 0.068 | 0.430 | 1 | 0.66 s |
+| Uniform random over the labels | | 35.8 (expected) | | | | |
+
+The split is the point: a one-token answer is the right tool for a judgment that is *in* the text, and the wrong
+one for an answer that has to be worked out. `mode = "deliberate"` lets the model think briefly, constrains only its
+final verdict token, and still returns a probability. The set was published on 2026-09-22 and we can't rule out
+that a model saw its items, so read the deliberate scores as "these models reach these answers", not as a
+contamination-free measurement.
 
 ### Same benchmark, vague checks
 
@@ -611,7 +770,8 @@ effort = "low"
 | `HUNCH_BACKEND_MODEL` | Quick single-model setup without a TOML file (exposed as `default`) |
 | `HUNCH_DEFAULT_MODEL` | Overrides `service.default_model` |
 | `HUNCH_CONCURRENCY` | Simultaneous backend calls. Keep it modest on a shared server |
-| `HUNCH_BACKEND_MODEL` + `mode` in `hunch.toml` | `one_token` (default), `deliberate` or `auto` — see [Deliberate mode](#deliberate-mode) |
+| `HUNCH_BACKEND_MODEL` + `mode` in `hunch.toml` | `one_token` (default), `deliberate`, `auto` — see [Deliberate mode](#deliberate-mode) — or `sample` (no logprobs; see [Backends without logprobs](#backends-without-logprobs)) |
+| `HUNCH_SAMPLES` | Votes per decision in mode `sample` (default 7), for a discovered model |
 | `HUNCH_MODE`, `HUNCH_EFFORT` | Override `mode` / `effort` for a model **discovered from the environment**. Ignored (with a warning) when a config file declares models — set them in the file instead |
 | `SSL_CERT_FILE` | CA bundle for a backend behind a private or self-signed CA, e.g. `/etc/ssl/certs/ca-certificates.crt` (Python doesn't use the system store by default) |
 | `HUNCH_API_KEYS` | Comma-separated bearer keys. Hunch **refuses** to listen beyond localhost without them (or `HUNCH_ALLOW_NOAUTH=1` behind an authenticating proxy) |
@@ -643,6 +803,7 @@ python -m hunch selftest                    # quick live pre-flight against your
 python -m hunch qualify qwen                 # full qualification of a model (verdict + reasons)
 python bench/bench.py accuracy qwen gemma   # live accuracy benchmark
 python bench/bench.py fanout qwen           # latency vs number of checks
+python bench/multistep.py DATA --model M    # the public multistep_decisions benchmark
 ```
 
 ## License

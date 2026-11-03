@@ -1,10 +1,11 @@
 ---
 name: hunch
 description: >
-  Use Hunch to get calibrated yes/no, pick-one and scale judgments from a local LLM, read from the
-  logprobs of a single constrained token. Use when code needs a semantic decision that plain logic
-  can't express - routing, filtering, ranking, verification, gating expensive work - and you want a
-  probability to threshold on instead of text to parse. Read this before writing the checks.
+  Use Hunch to get calibrated decisions (yes/no, pick-one, scale, tags, sort) and source-grounded
+  extraction from the caller's own LLM, read from token logprobs. Use when code needs a semantic
+  decision that plain logic can't express - routing, filtering, ranking, verification, gating
+  expensive work - or typed fields pulled out of text, and you want a probability to threshold on
+  instead of text to parse. Read this before writing the checks.
 ---
 
 # Building with Hunch
@@ -44,8 +45,28 @@ Add `"images": ["https://...", "data:image/jpeg;base64,..."]` (up to 8) to ask a
 model; they become part of the context as `IMAGE 1`…`IMAGE n`, and `context` may then be omitted.
 
 Results come back under your own ids: `yesno` → `p_yes`; `pick` → `pick`, `probs`, `confidence`;
-`scale` → `value` (expected level), `probs`, `confidence`. `model` is optional and defaults to the
-server's configured model.
+`scale` → `value` (expected level), `probs`, `confidence`; `tags` (`tags: {key: description}`) →
+`tags`, `probs`; `sort` (`items: [...]`, criterion in `question`) → `order`, `scores`. Every result
+except `sort` also has `answer` and `probability`; add `"min_probability": 0.9` to a check (or the
+request) and `answer` is `null` whenever the model is less sure than that. `model` is optional and
+defaults to the server's configured model.
+
+## Extraction
+
+`from hunch import extract; extract(text, fields, now="2026-11-03")`, `python -m hunch extract '<json>'`,
+the MCP `extract` tool, or `POST /v1/extract` with `{"context": text, "fields": {...}}`. A field is
+`"description"`, `["description"]` (every mention) or `{"description", "type", "min_probability"}` with
+type `text | number | money | date | time | duration`. Each comes back as
+`{"value", "text", "start", "end", "probability", "status"}`: act on it only when `value` is not
+`null`. The model copies spans; code finds them in the source and parses the type, so an invented
+value comes back `ungrounded`, never as a value. Don't ask extract for values that have to be
+computed or composed (totals, conclusions): extract the parts and compute in code.
+
+## Streaming
+
+`async with hunch.astream(checks) as s: u = await s.append(chunk)` (or WebSocket `/v1/stream`)
+re-judges the checks on all the text so far; `u["changed"]` lists the checks whose `answer` just
+flipped. Act on the flip, not on every update.
 
 ## Rules for writing checks
 
@@ -99,12 +120,15 @@ DeepSeek-V4.1-Flash in deliberate mode. For images, `python bench/images.py` run
 ## What not to do
 
 - **Set `mode = "deliberate"` in `hunch.toml`, not via `HUNCH_MODE`.** The variable applies only when a model is discovered from the environment; with a config file it is ignored, with a warning, because `mode` is per model there.
+- **Don't treat mode `sample` like a logprob backend.** It exists for hosted APIs without logprobs:
+  probabilities come in 1/samples steps and each vote costs a full prompt. Gate with care.
 - **Don't judge a thinking model on one token.** Some have no thinking-off mode (GLM-5.3: 66.7% on one
   token, 97.5% when it thinks first), and some have one that answers worse than it thinks
   (DeepSeek-V4.1-Flash: fails calibration on one token, 98.8% with ~60 thinking tokens). Set
   `mode = "deliberate"` for those; `qualify` tries it automatically and tells you which mode passes.
 - **Don't ask Hunch to generate text,** do maths, compare dates, or reason in several steps. Find
-  candidates in code and let a `pick` choose between them.
+  candidates in code and let a `pick` choose between them. Multi-step decisions need a model that
+  thinks first (`mode = "deliberate"`).
 - **Don't use multi-token labels.** Option keys and levels map to single tokens (letters and digits);
   Hunch handles that for you, so don't try to bypass it.
 - **Don't read a wrong answer as an unlucky one.** If a check fails often, first check whether the

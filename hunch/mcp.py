@@ -1,4 +1,4 @@
-"""A stdio MCP server exposing Hunch's `judge` as a tool, for agents that call tools rather than import
+"""A stdio MCP server exposing Hunch's `judge` and `extract` as tools, for agents that call tools rather than import
 Python. The agent starts it on demand; it uses the agent's own LLM endpoint from the environment (see
 hunch.client), so there is no separate server or settings file.
 
@@ -15,7 +15,7 @@ import sys
 from typing import Any, TextIO
 
 from . import __version__
-from .client import judge
+from .client import extract, judge
 from .engine import HunchError
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -26,8 +26,10 @@ JUDGE_TOOL = {
     "description": (
         "Ask one or more typed questions about some context (and optional images) and get calibrated "
         "probabilities back instead of text. Kinds: yesno -> p_yes; pick (1-300 options) -> pick, probs, "
-        "confidence; scale (levels lowest first) -> value, probs, confidence. Name the look-alike case in "
-        "no_if: it is worth 17-24 accuracy points. Act at p >= 0.9, review 0.5-0.9."),
+        "confidence; scale (levels lowest first) -> value, probs, confidence; tags (multi-label) -> tags, probs; "
+        "sort (items by a criterion) -> order, scores. Every result also has `answer` and `probability`; "
+        "answer is null under min_probability. Name the look-alike case in no_if: it is worth 17-24 "
+        "accuracy points. Act at p >= 0.9, review 0.5-0.9."),
     "inputSchema": {
         "type": "object",
         "properties": {
@@ -36,15 +38,42 @@ JUDGE_TOOL = {
             "checks": {"type": "object", "description": (
                 "Your ids -> check. {kind: yesno, question, yes_if?, no_if?} | "
                 "{kind: pick, question, options: {key: description|null}} | "
-                "{kind: scale, question, levels: [lowest, ..., highest]}"),
+                "{kind: scale, question, levels: [lowest, ..., highest]} | "
+                "{kind: tags, question, tags: {key: description|null}} | "
+                "{kind: sort, question, items: [..] | {key: item}, order?: desc|asc}. Any check: min_probability?"),
                 "additionalProperties": {"type": "object"}},
             "images": {"type": "array", "items": {"type": "string"}, "maxItems": 8,
                        "description": "Optional https:// or data:image/...;base64 URLs (vision models only), "
                                       "referred to as IMAGE 1..n."},
             "model": {"type": "string", "description": "Backend model id; default: the agent's configured model."},
             "effort": {"type": "string", "description": "Thinking effort for thinking models: low | high | max."},
+            "min_probability": {"type": "number", "description": "Answers below this probability come back null."},
         },
         "required": ["checks"],
+    },
+}
+
+EXTRACT_TOOL = {
+    "name": "extract",
+    "title": "Grounded extraction",
+    "description": (
+        "Pull typed fields out of text. Each field comes back with the exact span it was read from (start/end "
+        "offsets into the context), a probability, and a status: found | absent | unsure | ungrounded | unparsed. "
+        "A value the model wrote that is not in the text is never returned. Types: text, number, money "
+        "({amount, currency}), date (YYYY-MM-DD), time (HH:MM), duration (seconds)."),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "context": {"description": "The text to read (a string; an object is read as its JSON)."},
+            "fields": {"type": "object", "description": (
+                "name -> description | [description] (every mention, as a list) | "
+                "{description, type?: text|number|money|date|time|duration, many?: bool, min_probability?}"),
+                "additionalProperties": {}},
+            "model": {"type": "string"},
+            "min_probability": {"type": "number", "description": "Values below this probability come back null (status unsure)."},
+            "now": {"type": "string", "description": "Reference date for 'tomorrow' / 'next Friday', YYYY-MM-DD; default today."},
+        },
+        "required": ["context", "fields"],
     },
 }
 
@@ -66,14 +95,19 @@ def handle(msg: dict) -> dict | None:
     if method == "ping":
         return {}
     if method == "tools/list":
-        return {"tools": [JUDGE_TOOL]}
+        return {"tools": [JUDGE_TOOL, EXTRACT_TOOL]}
     if method == "tools/call":
-        if params.get("name") != "judge":
+        if params.get("name") not in ("judge", "extract"):
             raise ValueError(f"unknown tool {params.get('name')!r}")
         args = params.get("arguments") or {}
         try:
-            out = judge(args.get("context", ""), args.get("checks"), images=args.get("images"),
-                        model=args.get("model"), effort=args.get("effort"))
+            if params["name"] == "extract":
+                out = extract(args.get("context", ""), args.get("fields"), model=args.get("model"),
+                              min_probability=args.get("min_probability"), now=args.get("now"))
+            else:
+                out = judge(args.get("context", ""), args.get("checks"), images=args.get("images"),
+                            model=args.get("model"), effort=args.get("effort"),
+                            min_probability=args.get("min_probability"))
         except HunchError as e:
             # a tool error the agent can read and act on, not a protocol error
             return {"isError": True, "content": [{"type": "text", "text": f"{e.code}: {e.message}"}]}

@@ -41,6 +41,12 @@ class ModelSpec:
     # "max" on GLM-style models). Sent as reasoning_effort. More thinking buys stability: on our
     # benchmark GLM went 94.2% / 4.6% flips at "low" to 97.5% / 0.8% flips at the default.
     effort: str | None = None
+    # mode "sample" only (backends without token logprobs): votes per check, and their temperature.
+    # The probability moves in 1/samples steps; each vote costs a full prompt.
+    samples: int = 7
+    sample_temperature: float = 1.0
+    # extract: cap on generated tokens for the JSON answer (thinking tokens come on top, from think_budget)
+    extract_max_tokens: int = 1024
 
 
 @dataclass(frozen=True)
@@ -123,7 +129,8 @@ def load_settings(path: str | os.PathLike | None = None) -> Settings:
 URL_VARS = ("HUNCH_BACKEND_URL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "OPENAI_API_BASE", "LLM_BASE_URL")
 KEY_VARS = ("HUNCH_BACKEND_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "LLM_API_KEY")
 MODEL_VARS = ("HUNCH_BACKEND_MODEL", "ANTHROPIC_MODEL", "OPENAI_MODEL", "LLM_MODEL")
-# Hosted APIs that give no token logprobs under a constrained choice: Hunch cannot read an answer there.
+# Hosted APIs that give no token logprobs under a constrained choice. Hunch runs them in mode "sample":
+# several votes per check instead of one read of the logprobs.
 NO_LOGPROBS_HOSTS = ("api.anthropic.com",)
 
 
@@ -161,9 +168,7 @@ def discover_settings(base_url: str | None = None, api_key: str | None = None,
     if not url:
         raise DiscoveryError("no LLM endpoint: set HUNCH_BACKEND_URL (or ANTHROPIC_BASE_URL / OPENAI_BASE_URL)")
     url = api_root(url)
-    if any(h in url for h in NO_LOGPROBS_HOSTS):
-        raise DiscoveryError(f"{url} returns no token logprobs, which Hunch reads its answers from; "
-                             "point HUNCH_BACKEND_URL at an OpenAI-compatible vLLM server instead")
+    no_logprobs = any(h in url for h in NO_LOGPROBS_HOSTS)
     key = api_key if api_key is not None else _first(KEY_VARS)
     backend_model = model or _first(MODEL_VARS)
     if not backend_model:
@@ -176,9 +181,11 @@ def discover_settings(base_url: str | None = None, api_key: str | None = None,
                                  f"(or ANTHROPIC_MODEL / OPENAI_MODEL) to one of {served}")
         backend_model = served[0]
     effort = os.environ.get("HUNCH_EFFORT")
+    mode = os.environ.get("HUNCH_MODE") or ("sample" if no_logprobs else "auto")
+    # a hosted API may refuse vLLM's fields; in sample mode send only what the caller asked for
+    extra = ({"reasoning_effort": effort} if effort else {}) if mode == "sample" else {"reasoning_effort": effort or "none"}
     spec = ModelSpec(name=os.environ.get("HUNCH_MODEL_NAME", "default"), backend_model=backend_model,
-                     extra_body={"reasoning_effort": effort or "none"},
-                     mode=os.environ.get("HUNCH_MODE", "auto"))
+                     extra_body=extra, mode=mode, samples=int(os.environ.get("HUNCH_SAMPLES", "7")))
     return Settings(backend_url=url, backend_api_key=key, models={spec.name: spec}, default_model=spec.name,
                     max_concurrency=int(os.environ.get("HUNCH_CONCURRENCY", "16")),
                     api_keys=frozenset(k.strip() for k in os.environ.get("HUNCH_API_KEYS", "").split(",") if k.strip()))

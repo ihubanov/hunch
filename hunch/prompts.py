@@ -86,3 +86,23 @@ def scale(question: Any, levels: list[Any]) -> str:
     lines += [f"{i}) {render(desc)}" for i, desc in enumerate(levels)]
     lines.append("Reply with exactly one digit: the level that fits best.")
     return "\n".join(lines)
+
+
+def tag_question(question: Any, key: str, desc: Any) -> str:
+    """One tag of a `tags` check, asked as its own yes/no question."""
+    head = render(question) if question not in (None, "") else "Which tags apply to CONTEXT?"
+    return f"{head}\nDoes this tag apply to CONTEXT? Tag: {_option_text(key, desc)}"
+
+
+SORT_LEVELS = ["lowest", "very low", "low", "below average", "slightly below average",
+               "slightly above average", "above average", "high", "very high", "highest"]
+
+
+def sort_item(question: Any, item: Any, levels: list[Any]) -> str:
+    """One item of a `sort` check: rate it on the criterion. CONTEXT stays first, so the prefix is shared."""
+    lines = ["QUESTION (rate one ITEM on an ordered scale):",
+             render(question) if question not in (None, "") else "How well does ITEM fit what CONTEXT asks for?",
+             "ITEM:", render(item), "LEVELS (from lowest to highest):"]
+    lines += [f"{i}) {render(desc)}" for i, desc in enumerate(levels)]
+    lines.append("Reply with exactly one digit: the level that fits ITEM best.")
+    return "\n".join(lines)

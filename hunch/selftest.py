@@ -8,6 +8,8 @@ Per configured model:
      Backends that silently drop the constraint would give unconstrained answers, so they fail here.
   3. logprobs come back (probed together with 2)
   4. a 12-case labelled mini-benchmark (yesno / pick / scale) scores >= 11/12
+  5. (informational) extraction: does the backend enforce a JSON schema, and are the fields right?
+In mode "sample" (no logprobs) steps 2-3 are skipped: answers are votes, not a constrained token.
 """
 from __future__ import annotations
 
@@ -117,6 +119,26 @@ async def image_support(engine: Engine, spec) -> str:
     return f"accepted (a red square is red: p_yes {p:.2f})" if p >= 0.5 else f"accepted, but misjudged a red square (p_yes {p:.2f})"
 
 
+_EXTRACT_TEXT = "Order for Dana Reyes: two large pizzas, pick up at 7:30 pm on 2026-05-14, total $38.50, no drinks."
+_EXTRACT_FIELDS = {"customer": "the customer's name", "pickup": {"type": "time"}, "day": {"type": "date"},
+                   "total": {"type": "money"}, "drink": "a drink ordered"}
+_EXTRACT_WANT = {"customer": "Dana Reyes", "pickup": "19:30", "day": "2026-05-14",
+                 "total": {"amount": 38.5, "currency": "USD"}, "drink": None}
+
+
+async def extract_support(engine: Engine, spec) -> str:
+    """Informational: extraction needs response_format json_schema; judge checks don't."""
+    from .extraction import extract
+    try:
+        results, _ = await extract(engine, spec, _EXTRACT_TEXT, _EXTRACT_FIELDS)
+    except HunchError as e:
+        return f"not available ({e.code}: {e.message[:120]})"
+    right = sum(results[k]["value"] == v for k, v in _EXTRACT_WANT.items())
+    probs = [r["probability"] for r in results.values() if r.get("probability") is not None]
+    p = f", min field p {min(probs):.2f}" if probs else ""
+    return f"{right}/{len(_EXTRACT_WANT)} fields right{p}"
+
+
 async def run(names: list[str]) -> int:
     s = load_settings()
     names = names or list(s.models)
@@ -147,12 +169,15 @@ async def run(names: list[str]) -> int:
             print("ok   model is served")
             # the RESOLVED mode: with mode="auto" a thinking model needs the deliberate-sized probe
             mode = await engine.mode_for(spec)
-            problem = await probe_constraint(client, s, spec, headers, deliberate=(mode == "deliberate"))
-            if problem:
-                print(f"FAIL {problem}")
-                failures += 1
-                continue
-            print("ok   structured_outputs enforced and logprobs returned")
+            if mode == "sample":
+                print(f"info mode sample: no logprobs; each answer is {spec.samples} votes")
+            else:
+                problem = await probe_constraint(client, s, spec, headers, deliberate=(mode == "deliberate"))
+                if problem:
+                    print(f"FAIL {problem}")
+                    failures += 1
+                    continue
+                print("ok   structured_outputs enforced and logprobs returned")
             t0 = time.perf_counter()
             correct = []
             for context, check, expected in CASES:
@@ -168,6 +193,7 @@ async def run(names: list[str]) -> int:
             print(f"{'ok  ' if ok else 'FAIL'} mini-benchmark {passed}/{len(CASES)} correct, "
                   f"~{(time.perf_counter() - t0) * 1000 / len(CASES):.0f} ms per request")
             print(f"info images: {await image_support(engine, spec)}")
+            print(f"info extract: {await extract_support(engine, spec)}")
     print("\nSELFTEST", "PASSED" if not failures else f"FAILED ({failures})")
     return 1 if failures else 0
 

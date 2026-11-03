@@ -1,7 +1,8 @@
 """python -m hunch            serve (HUNCH_HOST / HUNCH_PORT, default 127.0.0.1:8791)
 python -m hunch judge JSON one judgment with the caller's LLM, no server: JSON (or - for stdin) is
                            {"context": ..., "checks": {...}, "images"?: [...], "model"?: ..., "effort"?: ...}
-python -m hunch mcp        stdio MCP server exposing `judge` (the agent starts it; no separate server)
+python -m hunch extract JSON  grounded extraction, no server: {"context": "...", "fields": {...}, "now"?: "YYYY-MM-DD"}
+python -m hunch mcp        stdio MCP server exposing `judge` and `extract` (the agent starts it; no separate server)
 python -m hunch selftest   quick pre-flight check against the configured backend (exit 0 = pass)
 python -m hunch qualify    full qualification of a model as a Hunch backend (exit 0 = qualified)
 """
@@ -57,7 +58,28 @@ def judge_cli(args: list[str]) -> int:
     try:
         req = json.loads(raw)
         out = judge(req.get("context", ""), req.get("checks"), images=req.get("images"),
-                    model=req.get("model"), effort=req.get("effort"))
+                    model=req.get("model"), effort=req.get("effort"), min_probability=req.get("min_probability"))
+    except json.JSONDecodeError as e:
+        print(json.dumps({"error": {"code": "invalid_request", "message": f"not JSON: {e}"}}))
+        return 2
+    except HunchError as e:
+        print(json.dumps({"error": {"code": e.code, "message": e.message}}))
+        return 1
+    print(json.dumps(out))
+    return 0
+
+
+def extract_cli(args: list[str]) -> int:
+    import json
+
+    from .client import extract
+    from .engine import HunchError
+
+    raw = sys.stdin.read() if not args or args[0] == "-" else args[0]
+    try:
+        req = json.loads(raw)
+        out = extract(req.get("context", ""), req.get("fields"), model=req.get("model"),
+                      min_probability=req.get("min_probability"), now=req.get("now"))
     except json.JSONDecodeError as e:
         print(json.dumps({"error": {"code": "invalid_request", "message": f"not JSON: {e}"}}))
         return 2
@@ -79,6 +101,8 @@ def main(argv: list[str] | None = None) -> int:
         return run(rest)
     if cmd == "judge":
         return judge_cli(rest)
+    if cmd == "extract":
+        return extract_cli(rest)
     if cmd == "mcp":
         from .mcp import serve as run
         return run()

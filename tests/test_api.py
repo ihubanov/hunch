@@ -94,7 +94,8 @@ def test_yesno_renormalised_over_labels():
         r = judge(c, {"a": {"kind": "yesno", "question": "yes-please?"}, "b": {"kind": "yesno", "question": "nope"}})
     assert r.status_code == 200, r.text
     res = r.json()["results"]
-    assert res["a"] == {"kind": "yesno", "p_yes": pytest.approx(0.7 / 0.9, abs=1e-3)}  # junk tokens don't dilute
+    assert res["a"] == {"kind": "yesno", "p_yes": pytest.approx(0.7 / 0.9, abs=1e-3),  # junk tokens don't dilute
+                        "answer": "yes", "probability": pytest.approx(0.7 / 0.9, abs=1e-3)}
     assert res["b"]["p_yes"] == pytest.approx(0.2 / 0.9, abs=1e-3)
     assert r.json()["model"] == "fast"
     assert r.json()["usage"] == {"prompt_tokens": 200, "completion_tokens": 2, "backend_calls": 2}
@@ -739,7 +740,8 @@ def test_no_build_artifacts_are_tracked():
 # ---------------------------------------------------------------- zero-config: library, CLI, MCP
 ENV_VARS = ("HUNCH_BACKEND_URL", "HUNCH_BACKEND_KEY", "HUNCH_BACKEND_MODEL", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY",
             "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL", "OPENAI_BASE_URL", "OPENAI_API_BASE", "OPENAI_API_KEY",
-            "OPENAI_MODEL", "LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL", "HUNCH_CONFIG", "HUNCH_MODE", "HUNCH_EFFORT")
+            "OPENAI_MODEL", "LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL", "HUNCH_CONFIG", "HUNCH_MODE", "HUNCH_EFFORT",
+            "HUNCH_SAMPLES")
 
 
 @pytest.fixture
@@ -765,12 +767,12 @@ def test_discovery_reads_the_agents_own_llm_settings(clean_env):
     assert (s.backend_url, s.backend_api_key) == ("http://override.test", "tok")
 
 
-def test_discovery_refuses_an_api_without_logprobs(clean_env):
+def test_discovery_samples_an_api_without_logprobs(clean_env):
     from hunch.config import DiscoveryError, discover_settings
     clean_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     clean_env.setenv("ANTHROPIC_MODEL", "claude-x")
-    with pytest.raises(DiscoveryError, match="no token logprobs"):
-        discover_settings()
+    spec = discover_settings().resolve(None)
+    assert (spec.mode, spec.extra_body, spec.samples) == ("sample", {}, 7)   # no vLLM-only fields sent
     clean_env.delenv("ANTHROPIC_BASE_URL")
     with pytest.raises(DiscoveryError, match="no LLM endpoint"):
         discover_settings()
@@ -864,7 +866,7 @@ def test_mcp_server_handshake_list_and_call(clean_env):
     replies = {r["id"]: r for r in map(json.loads, out.getvalue().splitlines())}
     assert set(replies) == {1, 2, 3, 4, 5}                                  # no reply to the notification
     assert replies[1]["result"]["serverInfo"]["name"] == "hunch" and "tools" in replies[1]["result"]["capabilities"]
-    assert [t["name"] for t in replies[2]["result"]["tools"]] == ["judge"]
+    assert [t["name"] for t in replies[2]["result"]["tools"]] == ["judge", "extract"]
     call = replies[3]["result"]
     assert not call.get("isError") and call["structuredContent"]["results"]["a"]["kind"] == "yesno"
     assert replies[4]["result"]["isError"] is True and "invalid_request" in replies[4]["result"]["content"][0]["text"]

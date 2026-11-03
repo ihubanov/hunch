@@ -1,7 +1,8 @@
 # Hunch
 
-> Calibrated yes/no, pick-one and scale judgments from your own LLMs, read straight off the logprobs of a
-> single constrained token. One HTTP call, no text to parse, runs on any vLLM OpenAI-compatible server.
+> Calibrated decisions, source-grounded extraction and streaming decisions from your own LLMs, read straight
+> off token logprobs. One HTTP call, no text to parse, runs on any vLLM OpenAI-compatible server (and, by
+> sampling, on chat APIs without logprobs).
 
 - [Agent guide (read this before writing checks)](https://raw.githubusercontent.com/ihubanov/hunch/main/SKILL.md): the API call, the rules for writing checks, thresholds, qualifying a model, and what not to do.
 - [README](https://raw.githubusercontent.com/ihubanov/hunch/main/README.md): quick start, full API reference, why logprobs instead of asking for JSON, benchmark results per model, configuration and deployment.
@@ -9,9 +10,12 @@
 
 ## Quick facts
 
-- Zero-config: `from hunch import judge` (in-process), `python -m hunch judge '<json>'`, or `python -m hunch mcp` (stdio tool). All use the agent's own endpoint (ANTHROPIC_BASE_URL / OPENAI_BASE_URL / HUNCH_BACKEND_URL); it must be a vLLM server with logprobs.
+- Zero-config: `from hunch import judge` (in-process), `python -m hunch judge '<json>'`, or `python -m hunch mcp` (stdio tool). All use the agent's own endpoint (ANTHROPIC_BASE_URL / OPENAI_BASE_URL / HUNCH_BACKEND_URL). The MCP server exposes `judge` and `extract`.
 - Endpoint: `POST /v1/judge` with `context` (string, object or array), `checks` (your ids -> check), and optional `images` (up to 8 http(s) or data: URLs, for vision models).
-- Check kinds: `yesno` (-> `p_yes`), `pick` (1-300 options -> `pick`, `probs`, `confidence`), `scale` (1-10 ordered levels -> `value`, `probs`, `confidence`).
+- Check kinds: `yesno` (-> `p_yes`), `pick` (1-300 options -> `pick`, `probs`, `confidence`), `scale` (1-10 ordered levels -> `value`, `probs`, `confidence`), `tags` (multi-label -> `tags`, `probs`), `sort` (items by a criterion -> `order`, `scores`). Every result has `answer` + `probability`; `answer` is null under `min_probability`.
+- Extraction: `POST /v1/extract` / `hunch.extract(text, fields)` -> per field `value`, `text`, `start`/`end` (offsets in the source), `probability`, `status` (found / absent / unsure / ungrounded / unparsed). Types: text, number, money, date, time, duration.
+- Streaming: `WS /v1/stream` / `hunch.astream(checks)`: append text, get re-judged results and the ids whose answer flipped.
+- No logprobs (hosted APIs): mode `sample`, several votes per decision (automatic for api.anthropic.com).
 - Also: `GET /v1/models`, `GET /health`, `python -m hunch selftest`, `python -m hunch qualify <model>`.
 - The highest-value rule: name the look-alike case in `no_if` / option descriptions. Vague checks cost 17-24 accuracy points.
 - Thinking models: set `mode = "deliberate"` in hunch.toml (think first, constrain only the verdict token). `qualify` tries it automatically when one-token mode fails. `HUNCH_MODE`/`HUNCH_EFFORT` work only when no config file declares models.

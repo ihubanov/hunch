@@ -3,6 +3,10 @@
 Every check is one (or, for big picks, several) `structured_outputs` choice + `logprobs` call with
 max_tokens=1 and temperature 0. Label probabilities are renormalised over the allowed labels. All calls
 of a request run in parallel, limited by a backend-wide semaphore.
+
+Backends that return no token logprobs (hosted APIs) run in mode "sample": the same prompt is asked
+`samples` times at temperature > 0 and the probability is the share of votes. Coarser (1/samples
+steps) and samples-times the input tokens, but it works on any OpenAI-compatible chat endpoint.
 """
 from __future__ import annotations
 
@@ -16,7 +20,7 @@ import httpx
 from . import prompts
 from .config import ModelSpec, Settings
 
-MODES = ("one_token", "deliberate", "auto")
+MODES = ("one_token", "deliberate", "auto", "sample")
 PROBE_MAX_TOKENS = 16   # enough to tell an answer from the start of a scratchpad
 # Values of `reasoning_effort` that mean "don't think". Dropped in deliberate mode; real effort levels
 # (low / high / max) are passed through, and "low" is often the best setting there — it can cut the
@@ -25,6 +29,22 @@ THINKING_OFF_EFFORTS = ("none", "off", "disable", "disabled")
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 DIGITS = "0123456789"
 MAX_LEVELS = len(DIGITS)
+SAMPLE_MAX_TOKENS = 8       # mode "sample": room for "Y", "Yes." or "**B**", never an essay
+MAX_SORT_ITEMS = 100
+MAX_TAGS = 50
+
+
+def read_label(text: str, labels: str) -> str | None:
+    """The label a free-text reply names (mode "sample"): the first allowed label character, or yes / no."""
+    t = text.strip().lstrip("*_`\"' (").upper()
+    if not t:
+        return None
+    if labels == "YN" or set(labels) == {"Y", "N"}:
+        if t.startswith("YES"):
+            return "Y"
+        if t.startswith("NO"):
+            return "N"
+    return t[0] if t[0] in labels else None
 
 
 def effective_extra_body(spec: ModelSpec, deliberate: bool) -> dict:
@@ -124,7 +144,10 @@ class Engine:
 
     async def label_probs(self, spec: ModelSpec, msgs: list[dict], labels: str,
                           mode: str | None = None) -> tuple[dict[str, float], Usage]:
-        deliberate = (mode or await self.mode_for(spec)) == "deliberate"
+        mode = mode or await self.mode_for(spec)
+        if mode == "sample":
+            return await self._sample_probs(spec, msgs, labels)
+        deliberate = mode == "deliberate"
         body = self._request(spec, msgs, labels, deliberate)
         headers = {"Authorization": f"Bearer {self.s.backend_api_key}"} if self.s.backend_api_key else {}
         last = "no attempt"
@@ -156,6 +179,58 @@ class Engine:
                 raise HunchError(502, "backend_error", f"backend HTTP {r.status_code}: {text}")
             return self._parse(r.json(), labels, deliberate)
         raise HunchError(503, "backend_unavailable", last)
+
+    async def post_chat(self, spec: ModelSpec, body: dict) -> dict:
+        """One chat completion with the retry / error mapping every Hunch call uses. Returns the JSON body."""
+        headers = {"Authorization": f"Bearer {self.s.backend_api_key}"} if self.s.backend_api_key else {}
+        last = "no attempt"
+        for attempt in range(self.s.retries + 1):
+            if attempt:
+                await asyncio.sleep(min(0.5 * 2 ** (attempt - 1), 4.0))
+            try:
+                async with self.sem:
+                    r = await self.client.post(f"{self.s.backend_url}/v1/chat/completions", json=body,
+                                               headers=headers, timeout=self.s.timeout_s)
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                last = f"{type(e).__name__}: {e}"
+                continue
+            if r.status_code == 429 or r.status_code >= 500:
+                last = f"backend HTTP {r.status_code}"
+                continue
+            if r.status_code >= 400:
+                text = r.text[:400]
+                if any(k in text.lower() for k in ("context length", "maximum context", "too long")):
+                    raise HunchError(413, "context_too_long", "context plus question exceed the backend model's context window")
+                raise HunchError(502, "backend_error", f"backend HTTP {r.status_code}: {text}")
+            return r.json()
+        raise HunchError(503, "backend_unavailable", last)
+
+    async def _sample_probs(self, spec: ModelSpec, msgs: list[dict], labels: str) -> tuple[dict[str, float], Usage]:
+        """Mode "sample": no logprobs, so ask `samples` times at temperature > 0 and count the votes.
+
+        Answers are read leniently (the first allowed label in the reply, or yes / no for Y / N), because
+        there is no constraint to enforce the format. Replies with no label are discarded; if none of the
+        samples answers, the call fails rather than guess.
+        """
+        body = {"model": spec.backend_model, "messages": msgs, "max_tokens": SAMPLE_MAX_TOKENS,
+                "temperature": spec.sample_temperature, **spec.extra_body}
+        replies = await asyncio.gather(*[self.post_chat(spec, body) for _ in range(max(1, spec.samples))])
+        votes = {lab: 0 for lab in labels}
+        usage = Usage()
+        for data in replies:
+            u = data.get("usage") or {}
+            usage.add(Usage(u.get("prompt_tokens", 0) or 0, u.get("completion_tokens", 0) or 0, 1))
+            try:
+                text = (data["choices"][0].get("message") or {}).get("content") or ""
+            except (KeyError, IndexError, TypeError):
+                continue
+            lab = read_label(text, labels)
+            if lab is not None:
+                votes[lab] += 1
+        n = sum(votes.values())
+        if n == 0:
+            raise HunchError(502, "backend_error", f"none of {spec.samples} sampled replies named one of {list(labels)}")
+        return {k: v / n for k, v in votes.items()}, usage
 
     async def mode_for(self, spec: ModelSpec) -> str:
         """The resolved mode. With mode="auto", probe the backend once and cache the answer."""
@@ -258,6 +333,37 @@ class Engine:
             usage.add(u)
         return {"kind": "yesno", "p_yes": round(sum(p["Y"] for p, _ in results) / len(results), 4)}, usage
 
+    async def tags(self, spec, ctx, c) -> tuple[dict, Usage]:
+        """Multi-label: every tag is its own yes/no check, all in parallel over the same cached context."""
+        items = list(c["tags"].items())
+        results = await asyncio.gather(*[
+            self.yesno(spec, ctx, {"question": prompts.tag_question(c.get("question"), key, desc)}) for key, desc in items])
+        usage = Usage()
+        probs = {}
+        for (key, _), (r, u) in zip(items, results):
+            usage.add(u)
+            probs[key] = r["p_yes"]
+        return {"kind": "tags", "tags": [k for k, p in probs.items() if p >= 0.5], "probs": probs}, usage
+
+    async def sort(self, spec, ctx, c) -> tuple[dict, Usage]:
+        """Order items by a criterion. The model rates each item (0-9, in parallel); code sorts by the
+        expected rating, so the order is as fine-grained as the probabilities, not just 10 buckets."""
+        items = c["items"]
+        keyed = list(items.items()) if isinstance(items, dict) else [(str(i), v) for i, v in enumerate(items)]
+        levels = c.get("levels") or prompts.SORT_LEVELS
+        labels = DIGITS[:len(levels)]
+        results = await asyncio.gather(*[
+            self.label_probs(spec, prompts.messages(ctx, prompts.sort_item(c.get("question"), item, levels)), labels)
+            for _, item in keyed])
+        usage = Usage()
+        scores = {}
+        for (key, _), (p, u) in zip(keyed, results):
+            usage.add(u)
+            scores[key] = round(sum(i * p[lab] for i, lab in enumerate(labels)), 4)
+        desc = c.get("order", "desc") != "asc"
+        order = sorted(scores, key=lambda k: scores[k], reverse=desc)   # stable: ties keep the given order
+        return {"kind": "sort", "order": order, "scores": scores}, usage
+
     async def pick(self, spec, ctx, c) -> tuple[dict, Usage]:
         options = list(c["options"].items())
         keys = [k for k, _ in options]
@@ -311,9 +417,9 @@ class Engine:
 
     # ------------------------------------------------------------------ request
     async def judge(self, spec: ModelSpec, context: Any, checks: dict[str, dict],
-                    images: list[str] | None = None) -> tuple[dict, Usage]:
+                    images: list[str] | None = None, min_probability: float | None = None) -> tuple[dict, Usage]:
         ctx = prompts.context_block(context, images or ())
-        handlers = {"yesno": self.yesno, "pick": self.pick, "scale": self.scale}
+        handlers = {"yesno": self.yesno, "pick": self.pick, "scale": self.scale, "tags": self.tags, "sort": self.sort}
         tasks = {cid: asyncio.ensure_future(handlers[c["kind"]](spec, ctx, c)) for cid, c in checks.items()}
         try:
             await asyncio.gather(*tasks.values())
@@ -324,9 +430,38 @@ class Engine:
         usage, results = Usage(), {}
         for cid, t in tasks.items():
             result, used = t.result()
-            results[cid] = result
+            results[cid] = with_answer(result, checks[cid], min_probability)
             usage.add(used)
         return results, usage
+
+
+def with_answer(result: dict, check: dict, min_probability: float | None = None) -> dict:
+    """Add the uniform `answer` / `probability` pair to a result (additive: the kind's own fields stay).
+
+    yesno -> "yes" | "no"; pick -> the key; scale -> the most likely level index; tags -> the list of
+    tags at p >= 0.5; sort -> the order. `answer` is null when `probability` is under the check's
+    `min_probability` (or the request's): the model was not sure, and code should not act on it.
+    """
+    kind = result.get("kind")
+    if kind == "yesno":
+        p = result["p_yes"]
+        answer, prob = ("yes", p) if p >= 0.5 else ("no", 1 - p)
+    elif kind == "pick":
+        answer, prob = result["pick"], result["probs"][result["pick"]]
+    elif kind == "scale":
+        probs = result["probs"]
+        answer = max(range(len(probs)), key=probs.__getitem__)
+        prob = probs[answer]
+    elif kind == "tags":
+        # the least certain tag decides how far the whole set can be trusted
+        answer = result["tags"]
+        prob = min((max(p, 1 - p) for p in result["probs"].values()), default=1.0)
+    else:
+        return result
+    floor = check.get("min_probability", min_probability)
+    if floor is not None and prob < floor:
+        answer = None
+    return {**result, "answer": answer, "probability": round(prob, 4)}
 
 
 MAX_IMAGES = 8
@@ -359,6 +494,8 @@ async def run_info(engine: "Engine", spec: ModelSpec, requested_effort: str | No
     one_token mode, where thinking is off), and a note whenever a requested effort was not applied, so a
     caller never mistakes an ignored effort for an applied one."""
     mode = await engine.mode_for(spec)
+    if mode == "sample":
+        return {"mode": mode, "effort": None, "samples": spec.samples}
     sent = effective_extra_body(spec, mode == "deliberate").get("reasoning_effort") if mode == "deliberate" else None
     info: dict = {"mode": mode, "effort": sent}
     if requested_effort is not None and sent != requested_effort:
@@ -391,7 +528,27 @@ def validate_checks(checks: dict[str, Any], max_options: int) -> dict[str, dict]
                 raise HunchError(400, "invalid_request", f"check {cid!r}: `levels` must be a non-empty list, lowest first")
             if len(levels) > MAX_LEVELS:
                 raise HunchError(400, "too_many_levels", f"check {cid!r} has {len(levels)} levels; the maximum is {MAX_LEVELS}")
+        elif kind == "tags":
+            tags = c.get("tags")
+            if not isinstance(tags, dict) or not tags:
+                raise HunchError(400, "invalid_request", f"check {cid!r}: `tags` must be a non-empty object of key -> description|null")
+            if len(tags) > MAX_TAGS:
+                raise HunchError(400, "too_many_options", f"check {cid!r} has {len(tags)} tags; the maximum is {MAX_TAGS}")
+        elif kind == "sort":
+            items = c.get("items")
+            if not isinstance(items, (dict, list)) or not items:
+                raise HunchError(400, "invalid_request", f"check {cid!r}: `items` must be a non-empty list or object of key -> item")
+            if len(items) > MAX_SORT_ITEMS:
+                raise HunchError(400, "too_many_options", f"check {cid!r} has {len(items)} items; the maximum is {MAX_SORT_ITEMS}")
+            if c.get("order", "desc") not in ("asc", "desc"):
+                raise HunchError(400, "invalid_request", f"check {cid!r}: `order` must be asc or desc")
+            levels = c.get("levels")
+            if levels is not None and (not isinstance(levels, list) or not 2 <= len(levels) <= MAX_LEVELS):
+                raise HunchError(400, "invalid_request", f"check {cid!r}: `levels` must list 2-{MAX_LEVELS} levels, lowest first")
         else:
-            raise HunchError(400, "invalid_request", f"check {cid!r}: `kind` must be one of yesno, pick, scale")
+            raise HunchError(400, "invalid_request", f"check {cid!r}: `kind` must be one of yesno, pick, scale, tags, sort")
+        mp = c.get("min_probability")
+        if mp is not None and not (isinstance(mp, (int, float)) and 0 <= mp <= 1):
+            raise HunchError(400, "invalid_request", f"check {cid!r}: `min_probability` must be a number in [0, 1]")
         out[cid] = c
     return out
