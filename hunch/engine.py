@@ -141,7 +141,7 @@ class Engine:
     # ------------------------------------------------------------- backend call
     def _request(self, spec: ModelSpec, msgs: list[dict], labels: str, deliberate: bool) -> dict:
         extra = effective_extra_body(spec, deliberate)
-        return {
+        body = {
             "model": spec.backend_model,
             "messages": msgs,
             # Use structured_outputs: some vLLM versions silently ignore the legacy `guided_choice` param.
@@ -152,6 +152,9 @@ class Engine:
             "temperature": 0,
             **extra,
         }
+        if not spec.constrained:
+            del body["structured_outputs"]
+        return body
 
     async def label_probs(self, spec: ModelSpec, msgs: list[dict], labels: str,
                           mode: str | None = None) -> tuple[dict[str, float], Usage]:
@@ -188,7 +191,14 @@ class Engine:
                 if any(k in text.lower() for k in ("context length", "maximum context", "too long")):
                     raise HunchError(413, "context_too_long", "context plus question exceed the backend model's context window")
                 raise HunchError(502, "backend_error", f"backend HTTP {r.status_code}: {text}")
-            return self._parse(r.json(), labels, deliberate)
+            data = r.json()
+            if not spec.constrained and not ((data.get("choices") or [{}])[0].get("logprobs") or {}).get("content"):
+                # A router in front of several providers (constrained=false backends) occasionally serves a
+                # call from one that drops logprobs. The model never answered here, so this is a retry, not a guess.
+                last = "backend returned no logprobs"
+                continue
+            return self._parse(data, labels, deliberate,
+                               min_label_mass=None if spec.constrained else spec.min_label_mass)
         raise HunchError(503, "backend_unavailable", last)
 
     async def post_chat(self, spec: ModelSpec, body: dict) -> dict:
@@ -301,7 +311,10 @@ class Engine:
         return not (msg.get("content") or "").strip().lower().lstrip('"\'*_ ').startswith("yes")
 
     @staticmethod
-    def _parse(data: dict, labels: str, deliberate: bool = False) -> tuple[dict[str, float], Usage]:
+    def _parse(data: dict, labels: str, deliberate: bool = False,
+               min_label_mass: float | None = None) -> tuple[dict[str, float], Usage]:
+        """min_label_mass None: the backend constrained the answer. A number: it did not (constrained=False),
+        so read only the allowed labels from the top_logprobs and require them to hold that much probability."""
         allowed = set(labels)   # NOT `in labels`: "" is a substring of every string
         try:
             toks = data["choices"][0]["logprobs"]["content"]
@@ -314,6 +327,8 @@ class Engine:
                                  "no constrained verdict token within think_budget; raise it or use mode=one_token")
             raise HunchError(502, "backend_error", "backend returned no logprobs")
         chosen = str(tok.get("token", "")).strip()
+        if min_label_mass is not None and not deliberate:
+            return Engine._parse_unconstrained(data, tok, labels, chosen, min_label_mass)
         if chosen not in allowed:
             # Never derive a probability from an unrelated token. Say WHY: a thinking model in one_token mode
             # spends its one token opening the reasoning (it lands in `reasoning`), which is a config problem,
@@ -336,6 +351,24 @@ class Engine:
         total = sum(probs.values())
         u = data.get("usage") or {}
         return {k: v / total for k, v in probs.items()}, Usage(u.get("prompt_tokens", 0) or 0, u.get("completion_tokens", 0) or 0, 1)
+
+    @staticmethod
+    def _parse_unconstrained(data: dict, tok: dict, labels: str, chosen: str,
+                             min_label_mass: float) -> tuple[dict[str, float], Usage]:
+        probs = {lab: 0.0 for lab in labels}
+        for t in tok.get("top_logprobs") or []:
+            s = str(t.get("token", "")).strip()
+            if s in probs and t.get("logprob") is not None:
+                probs[s] += math.exp(t["logprob"])
+        if chosen in probs and probs[chosen] == 0.0 and tok.get("logprob") is not None:
+            probs[chosen] = math.exp(tok["logprob"])
+        mass = sum(probs.values())
+        if mass < min_label_mass:
+            raise HunchError(502, "off_label",
+                             f"unconstrained backend answered {chosen!r}; the allowed labels {list(labels)} hold only "
+                             f"{mass:.2f} of the probability (min_label_mass {min_label_mass:g})")
+        u = data.get("usage") or {}
+        return {k: v / mass for k, v in probs.items()}, Usage(u.get("prompt_tokens", 0) or 0, u.get("completion_tokens", 0) or 0, 1)
 
     # --------------------------------------------------------------- check kinds
     async def yesno(self, spec, ctx, c) -> tuple[dict, Usage]:

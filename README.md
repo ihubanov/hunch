@@ -128,7 +128,7 @@ explicitly asks for money back. Hunch reports that uncertainty instead of guessi
 | --- | --- | --- |
 | Self-hosted [vLLM](https://github.com/vllm-project/vllm), or llama.cpp's `llama-server` | one token, read off the logprobs, answer constrained to your options | **Proven.** The one-token benchmarks in this README ran on vLLM; `llama-server` runs in our own deployments |
 | Hosted chat APIs with no token logprobs, such as Claude's API, directly or through OpenRouter | mode [`sample`](#backends-without-logprobs): a few votes per decision, probability = vote share. Chosen automatically for `api.anthropic.com`; elsewhere set `HUNCH_MODE=sample` | **Works, coarser and costlier.** Measured on Claude Haiku 5.5 via OpenRouter (below) |
-| Hosted APIs that do return logprobs (some OpenRouter providers, DeepInfra, …) | one token, if the provider also constrains the answer | **Not supported yet.** Tested through OpenRouter (Qwen3.5-397B, Gemma-4-31B, `provider.require_parameters`): logprobs come back, but the answer can't be constrained to your options, so `qualify` refuses the backend. Use mode `sample` there |
+| Hosted APIs that return logprobs but can't constrain the answer (OpenRouter, …) | one token with `constrained = false`: only your options' probabilities are read and renormalised; an answer outside them fails as `off_label` | **Works.** Qualified through OpenRouter (see [Hosted logprob APIs](#hosted-logprob-apis)) |
 
 Inside a coding CLI, see [Zero-config](#zero-config-library-cli-mcp) for which settings the CLI passes on.
 
@@ -321,6 +321,37 @@ Errors come back as `{"error": {"code": "...", "message": "..."}}`:
 | 502 | `backend_error` | The backend returned an error, or did **not** enforce the constraint (never turned into a made-up probability) |
 | 502 | `no_label` | Mode `sample`: none of the sampled replies named an allowed answer |
 | 503 | `backend_unavailable` | Still failing after retries (429 / 5xx / timeouts, with `Retry-After` honoured) |
+
+### Hosted logprob APIs
+
+Some hosted APIs return token logprobs but ignore `structured_outputs`, so the answer can't be forced to your
+options. Set `constrained = false` for the model: Hunch then reads only your options' probabilities from the
+first token's `top_logprobs` and renormalises them. If your options hold less than `min_label_mass` (default 0.5)
+of the probability, the call fails with `off_label` instead of guessing. A response that comes back without
+logprobs (a router can hand a call to a provider that drops them) is retried. Run `python -m hunch qualify` first.
+
+```toml
+[backend]
+url = "https://openrouter.ai/api/v1"
+
+[models.gemma]
+backend_model = "google/gemma-4-31b-it"
+constrained = false
+[models.gemma.extra_body]
+reasoning = { enabled = false }                 # one-token answers need thinking off
+provider = { require_parameters = true }        # only providers that return logprobs
+```
+
+Measured through OpenRouter (full `qualify`: 240 labelled pairs, two runs and a question-only run), next to the
+same models on self-hosted vLLM:
+
+| Model | Accuracy at 0.9, OpenRouter | ECE, OpenRouter | Flips | Self-hosted accuracy / ECE |
+| --- | --- | --- | --- | --- |
+| Gemma-4-31B-IT | 98.8% | 0.013 | 0.0% | 98.8% / 0.013 |
+| Qwen3.5-397B-A17B | 99.6% | 0.047 | 0.4% | 100.0% / 0.017 |
+
+Both qualify. The first run found that OpenRouter occasionally answers without logprobs (1–4 calls in 720); those
+calls are now retried.
 
 ### Backends without logprobs
 

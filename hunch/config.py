@@ -45,6 +45,12 @@ class ModelSpec:
     # The probability moves in 1/samples steps; each vote costs a full prompt.
     samples: int = 7
     sample_temperature: float = 1.0
+    # False for backends that return logprobs but can't constrain the answer (hosted APIs that ignore
+    # structured_outputs). The answer is then read from the first token's top_logprobs: only the allowed
+    # labels count, renormalised. A call whose labels hold less than min_label_mass of the probability
+    # raises `off_label` instead of guessing. one_token and deliberate modes only.
+    constrained: bool = True
+    min_label_mass: float = 0.5
     # extract: cap on generated tokens for the JSON answer (thinking tokens come on top, from think_budget)
     extract_max_tokens: int = 1024
 

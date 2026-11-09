@@ -67,6 +67,7 @@ class Report:
     ece: float | None = None
     flip_rate: float | None = None
     errors: int = 0
+    error_samples: list[str] = field(default_factory=list)   # "code: message" of each failed request
     seconds: float = 0.0
 
 
@@ -105,17 +106,22 @@ def verdict(r: Report, c: Criteria) -> Report:
     if r.flip_rate is not None and r.flip_rate > c.max_flip_rate:
         r.reasons.append(f"{100 * r.flip_rate:.1f}% of answers flip between identical runs (> {100 * c.max_flip_rate:g}%)")
     if r.errors:
-        r.reasons.append(f"{r.errors} requests failed")
+        codes = collections.Counter(e.split(":", 1)[0] for e in r.error_samples)
+        detail = ", ".join(f"{n} {code}" for code, n in codes.most_common())
+        first = f"; first: {r.error_samples[0][:200]}" if r.error_samples else ""
+        r.reasons.append(f"{r.errors} requests failed" + (f" ({detail}{first})" if detail else ""))
     r.qualified = not r.reasons
     return r
 
 
-async def _run(engine: Engine, spec, items: list[dict]) -> list[float | None]:
+async def _run(engine: Engine, spec, items: list[dict], errors: list[str] | None = None) -> list[float | None]:
     async def one(it):
         try:
             results, _ = await engine.judge(spec, it["context"], {"q": it["check"]})
             return results["q"]["p_yes"]
-        except HunchError:
+        except HunchError as e:
+            if errors is not None:
+                errors.append(f"{e.code}: {e.message}")
             return None
     return await asyncio.gather(*[one(it) for it in items])
 
@@ -145,13 +151,13 @@ async def qualify_model(engine: Engine, client: httpx.AsyncClient, name: str, se
     named, vague = build(), build(vague=True)
     labels = [it["label"] for it in named]
     progress(f"   {r.model}: mode={r.mode}, named look-alikes, run 1/{1 if quick else 2} ...")
-    run1 = await _run(engine, spec, named)
+    run1 = await _run(engine, spec, named, r.error_samples)
     run2 = None
     if not quick:
         progress(f"   {name}: named look-alikes, run 2/2 ...")
-        run2 = await _run(engine, spec, named)
+        run2 = await _run(engine, spec, named, r.error_samples)
     progress(f"   {name}: question only (vague) ...")
-    run_vague = await _run(engine, spec, vague)
+    run_vague = await _run(engine, spec, vague, r.error_samples)
 
     scored = [(p, y) for p, y in zip(run1, labels) if p is not None]
     r.errors = sum(p is None for p in run1) + sum(p is None for p in run_vague) + (sum(p is None for p in run2) if run2 else 0)

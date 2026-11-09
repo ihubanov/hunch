@@ -922,3 +922,83 @@ def test_hunch_mode_env_applies_when_no_config_declares_models(monkeypatch, tmp_
     s = config.discover_settings()
     assert (s.resolve(None).mode, s.resolve(None).extra_body["reasoning_effort"]) == ("deliberate", "low")
     assert "ignoring" not in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------- constrained = false
+def unconstrained_backend(first="Y", top=None):
+    """A hosted-style backend: returns logprobs, ignores structured_outputs (and must not be sent it)."""
+    state = {"bodies": []}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        state["bodies"].append(body)
+        tops = top if top is not None else [{"token": " Y", "logprob": math.log(0.6)}, {"token": "N", "logprob": math.log(0.3)},
+                                            {"token": "Yes", "logprob": math.log(0.1)}]
+        lp = next((t["logprob"] for t in tops if t["token"].strip() == first), math.log(0.5))
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": first},
+                         "logprobs": {"content": [{"token": first, "logprob": lp, "top_logprobs": tops}]}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 1}})
+    return httpx.MockTransport(handler), state
+
+
+UNCONSTRAINED = Settings(backend_url="http://backend.test", default_model="hosted",
+                         models={"hosted": ModelSpec(name="hosted", backend_model="org/hosted", constrained=False)})
+
+
+def test_unconstrained_reads_allowed_labels_and_sends_no_constraint():
+    transport, state = unconstrained_backend()
+    with TestClient(create_app(UNCONSTRAINED, transport=transport)) as c:
+        r = judge(c, {"q": {"kind": "yesno", "question": "x"}})
+    assert r.status_code == 200
+    assert r.json()["results"]["q"]["p_yes"] == pytest.approx(0.6 / 0.9, abs=1e-3)   # "Yes" is not a label
+    assert all("structured_outputs" not in b for b in state["bodies"])
+
+
+def test_unconstrained_off_label_answer_raises():
+    tops = [{"token": "The", "logprob": math.log(0.8)}, {"token": "Y", "logprob": math.log(0.1)}]
+    transport, _ = unconstrained_backend(first="The", top=tops)
+    with TestClient(create_app(UNCONSTRAINED, transport=transport)) as c:
+        r = judge(c, {"q": {"kind": "yesno", "question": "x"}})
+    assert r.status_code == 502 and r.json()["error"]["code"] == "off_label"
+
+
+def test_constrained_default_still_sends_structured_outputs():
+    c, state = client()
+    with c:
+        judge(c, {"q": {"kind": "yesno", "question": "yes-please"}})
+    assert state["bodies"] and all("structured_outputs" in b for b in state["bodies"])
+
+
+def test_probe_unconstrained_needs_only_logprobs():
+    import asyncio
+    from hunch.selftest import probe_constraint
+
+    async def go():
+        transport, state = unconstrained_backend(first="A", top=[{"token": "A", "logprob": math.log(0.9)}])
+        async with httpx.AsyncClient(transport=transport) as hc:
+            return await probe_constraint(hc, UNCONSTRAINED, UNCONSTRAINED.models["hosted"], {}), state
+
+    problem, state = asyncio.run(go())
+    assert problem is None and "structured_outputs" not in state["bodies"][0]
+
+
+def test_qualify_reports_why_requests_failed():
+    from hunch.qualify import Report, verdict
+    r = verdict(Report(model="m", backend_model="b", accuracy=99.0, ece=0.01, flip_rate=0.0, errors=2,
+                       error_samples=["off_label: answered 'The'", "backend_error: HTTP 400"]), Criteria())
+    assert r.qualified is False and any("1 off_label" in x and "1 backend_error" in x for x in r.reasons)
+
+
+def test_unconstrained_retries_a_response_without_logprobs():
+    calls = {"n": 0}
+    good_transport, _ = unconstrained_backend()
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(200, json={"choices": [{"message": {"content": "Y"}}], "usage": {}})
+        return good_transport.handle_request(request)
+    with TestClient(create_app(UNCONSTRAINED, transport=httpx.MockTransport(handler))) as c:
+        r = judge(c, {"q": {"kind": "yesno", "question": "x"}})
+    assert r.status_code == 200 and calls["n"] == 2

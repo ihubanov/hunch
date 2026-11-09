@@ -52,6 +52,8 @@ async def probe_constraint(client: httpx.AsyncClient, s, spec, headers: dict, de
     In deliberate mode the model thinks first, so the probe must allow it the same budget: with
     max_tokens=2 a thinking model spends both tokens thinking and looks unconstrained.
     """
+    if not spec.constrained:
+        return await _probe_logprobs(client, s, spec, headers, deliberate)
     body = {"model": spec.backend_model, "messages": [{"role": "user", "content": "Write the word hello and nothing else."}],
             "structured_outputs": {"choice": ["A", "B"]}, "logprobs": True, "top_logprobs": 2,
             "max_tokens": spec.think_budget if deliberate else 2, "temperature": 0,
@@ -75,6 +77,32 @@ async def probe_constraint(client: httpx.AsyncClient, s, spec, headers: dict, de
     if content not in ("A", "B"):
         return f"structured_outputs NOT enforced (got {content!r}); answers would be unconstrained"
     if not (d["choices"][0].get("logprobs") or {}).get("content"):
+        return "no logprobs returned"
+    return None
+
+
+async def _probe_logprobs(client: httpx.AsyncClient, s, spec, headers: dict, deliberate: bool) -> str | None:
+    """constrained = false: the backend is not asked to constrain the answer, only to return logprobs.
+    Whether the model keeps to the labels on its own is measured by the run itself (off_label errors)."""
+    body = {"model": spec.backend_model,
+            "messages": [{"role": "user", "content": "Reply with exactly one letter, A or B: which letter comes first in the alphabet?"}],
+            "logprobs": True, "top_logprobs": 2, "max_tokens": spec.think_budget if deliberate else 1, "temperature": 0,
+            **effective_extra_body(spec, deliberate)}
+    r = None
+    for attempt in range(s.retries + 1):
+        if attempt:
+            await asyncio.sleep(min(0.5 * 2 ** (attempt - 1), 4.0))
+        try:
+            r = await client.post(f"{s.backend_url}/v1/chat/completions", json=body, headers=headers, timeout=60)
+        except (httpx.TimeoutException, httpx.TransportError):
+            continue
+        if r.status_code != 429 and r.status_code < 500:
+            break
+    if r is None:
+        return "logprobs probe: backend unreachable"
+    if r.status_code != 200:
+        return f"logprobs probe: HTTP {r.status_code} {r.text[:200]}"
+    if not (r.json()["choices"][0].get("logprobs") or {}).get("content"):
         return "no logprobs returned"
     return None
 
@@ -177,7 +205,8 @@ async def run(names: list[str]) -> int:
                     print(f"FAIL {problem}")
                     failures += 1
                     continue
-                print("ok   structured_outputs enforced and logprobs returned")
+                print("ok   structured_outputs enforced and logprobs returned" if spec.constrained
+                      else "ok   logprobs returned (constrained = false: answers read from top_logprobs)")
             t0 = time.perf_counter()
             correct = []
             for context, check, expected in CASES:
