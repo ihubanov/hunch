@@ -364,7 +364,7 @@ The same engine runs three more ways, all using **the LLM the agent already has*
 | --- | --- | --- |
 | Library | `from hunch import judge, ajudge` | Python agents and scripts: in-process, no server |
 | One-shot CLI | `python -m hunch judge '<json>'` (or `-` for stdin) | shells, other languages, cron |
-| MCP server | `python -m hunch mcp` (stdio, one `judge` tool) | agents that call tools: the agent starts it on demand |
+| MCP server | `python -m hunch mcp` (stdio, `judge` and `extract` tools) | agents that call tools: the agent starts it on demand |
 | HTTP server | `python -m hunch` | a shared service; unchanged, and now also zero-config |
 
 Settings are found in this order: arguments (`judge(..., base_url=, api_key=, model=)`), a `hunch.toml`, then the
@@ -389,9 +389,15 @@ agent's own variables. The first one set wins:
   This is the only change to the HTTP response since v1.5: two added fields, and `notes` when relevant.
 - **The main model, not the small one.** `ANTHROPIC_SMALL_FAST_MODEL` is deliberately not read. Run
   `python -m hunch qualify` on whatever you point it at.
-- **It needs token logprobs.** The endpoint has to be an OpenAI-compatible vLLM server (a gateway in front of one is
-  fine). Anthropic's API returns no logprobs and can't constrain the answer, so an agent running on Claude itself
-  should set `HUNCH_BACKEND_URL` to a vLLM server; pointing at `api.anthropic.com` is refused with that message.
+- **It works best with token logprobs.** Point it at an OpenAI-compatible vLLM server (a gateway in front of one is
+  fine). Anthropic's API returns no logprobs, so for `api.anthropic.com` Hunch switches to
+  [`sample` mode](#backends-without-logprobs): slower, and the probability is a vote share. For one-token speed, an
+  agent running on Claude itself should set `HUNCH_BACKEND_URL` to a vLLM server.
+- **Inside a coding CLI, Hunch sees only the variables someone set.** Checked with Claude Code 2.1: an MCP server it
+  starts inherits its environment, so `ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` set for the CLI (as forks and
+  local-model setups do) reach Hunch, and it uses the CLI's own model with no setup. A normal subscription login sets
+  neither variable, and choosing a model with `--model` does not export `ANTHROPIC_MODEL`. There, name the backend:
+  `claude mcp add hunch -e HUNCH_BACKEND_URL=http://your-vllm:8000/v1 -e HUNCH_BACKEND_MODEL=your-model -- python -m hunch mcp`.
 - `judge()` blocks, and is safe to call from code that already runs an event loop. `ajudge()` is the async version.
   Both return the HTTP API's `{"model", "results", "usage"}` and raise `hunch.HunchError` (`.code`, `.message`).
 
