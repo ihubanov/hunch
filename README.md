@@ -128,7 +128,7 @@ explicitly asks for money back. Hunch reports that uncertainty instead of guessi
 | --- | --- | --- |
 | Self-hosted [vLLM](https://github.com/vllm-project/vllm), or llama.cpp's `llama-server` | one token, read off the logprobs, answer constrained to your options | **Proven.** The one-token benchmarks in this README ran on vLLM; `llama-server` runs in our own deployments |
 | Hosted chat APIs with no token logprobs, such as Claude's API, directly or through OpenRouter | mode [`sample`](#backends-without-logprobs): a few votes per decision, probability = vote share. Chosen automatically for `api.anthropic.com`; elsewhere set `HUNCH_MODE=sample` | **Works, coarser and costlier.** Measured on Claude Haiku 5.5 via OpenRouter (below) |
-| Hosted APIs that do return logprobs (some OpenRouter providers, DeepInfra, …) | one token, if the provider also constrains the answer | **Untested.** Logprob and constrained-output support varies by provider and model, and OpenRouter silently drops parameters a provider lacks unless `provider.require_parameters` is set. Run `python -m hunch qualify` before relying on one |
+| Hosted APIs that do return logprobs (some OpenRouter providers, DeepInfra, …) | one token, if the provider also constrains the answer | **Not supported yet.** Tested through OpenRouter (Qwen3.5-397B, Gemma-4-31B, `provider.require_parameters`): logprobs come back, but the answer can't be constrained to your options, so `qualify` refuses the backend. Use mode `sample` there |
 
 Inside a coding CLI, see [Zero-config](#zero-config-library-cli-mcp) for which settings the CLI passes on.
 
