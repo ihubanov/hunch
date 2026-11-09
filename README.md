@@ -39,8 +39,8 @@ on fire vs one lit by fireworks), four vision models qualify, one of them a 4-bi
   four models qualify on a hand-labelled set of 188 look-alike photos (see [Images](#images)).
 - **Parallel by default.** All checks in a request run concurrently, with the context first in every prompt so the
   server's prefix cache is reused.
-- **Your models, your hardware.** Hunch runs against any [vLLM](https://github.com/vllm-project/vllm)
-  OpenAI-compatible server. No data leaves your network.
+- **Your models, your hardware.** Hunch runs against a self-hosted [vLLM](https://github.com/vllm-project/vllm) or
+  `llama-server` endpoint. No data leaves your network. See [Which backends work](#which-backends-work).
 - **Any chat API, too.** Hosted endpoints that give no token logprobs run in mode `sample`: each decision is a few
   short votes, and the probability is the share of votes. Coarser and costlier than one logprob read, but it works
   everywhere (see [Backends without logprobs](#backends-without-logprobs)).
@@ -121,6 +121,16 @@ curl -s localhost:8791/v1/judge -H 'content-type: application/json' -d '{
 
 That's a real response from Qwen3.5-397B (lightly trimmed). `p_yes` is 0.59 because the customer reports a double charge but never
 explicitly asks for money back. Hunch reports that uncertainty instead of guessing, and your code decides what 0.59 means.
+
+## Which backends work
+
+| Backend | How Hunch runs | Status |
+| --- | --- | --- |
+| Self-hosted [vLLM](https://github.com/vllm-project/vllm), or llama.cpp's `llama-server` | one token, read off the logprobs, answer constrained to your options | **Proven.** The one-token benchmarks in this README ran on vLLM; `llama-server` runs in our own deployments |
+| Hosted chat APIs with no token logprobs, such as Claude's API, directly or through OpenRouter | mode [`sample`](#backends-without-logprobs): a few votes per decision, probability = vote share. Chosen automatically for `api.anthropic.com`; elsewhere set `HUNCH_MODE=sample` | **Works, coarser and costlier.** Measured on Claude Haiku 5.5 via OpenRouter (below) |
+| Hosted APIs that do return logprobs (some OpenRouter providers, DeepInfra, …) | one token, if the provider also constrains the answer | **Untested.** Logprob and constrained-output support varies by provider and model, and OpenRouter silently drops parameters a provider lacks unless `provider.require_parameters` is set. Run `python -m hunch qualify` before relying on one |
+
+Inside a coding CLI, see [Zero-config](#zero-config-library-cli-mcp) for which settings the CLI passes on.
 
 ## Qualify your model first
 
