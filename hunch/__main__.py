@@ -5,6 +5,7 @@ python -m hunch extract JSON  grounded extraction, no server: {"context": "...",
 python -m hunch mcp        stdio MCP server exposing `judge` and `extract` (the agent starts it; no separate server)
 python -m hunch selftest   quick pre-flight check against the configured backend (exit 0 = pass)
 python -m hunch qualify    full qualification of a model as a Hunch backend (exit 0 = qualified)
+python -m hunch probe [--json]  what the backend supports, and the mode / settings to run it with
 """
 import ipaddress
 import os
@@ -99,6 +100,9 @@ def main(argv: list[str] | None = None) -> int:
         return run(rest)
     if cmd == "qualify":
         from .qualify import main as run
+        return run(rest)
+    if cmd == "probe":
+        from .probe import main as run
         return run(rest)
     if cmd == "judge":
         return judge_cli(rest)

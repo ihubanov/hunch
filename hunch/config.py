@@ -5,6 +5,7 @@ Quickest setup without a file: HUNCH_BACKEND_URL + HUNCH_BACKEND_MODEL (exposed 
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import pathlib
@@ -61,12 +62,25 @@ class Settings:
     backend_api_key: str | None = None
     models: dict[str, ModelSpec] = field(default_factory=dict)
     default_model: str | None = None
-    max_concurrency: int = 16          # simultaneous calls to the backend
+    max_concurrency: int = 16          # simultaneous calls to the backend (4 by default on hosted APIs)
     timeout_s: float = 30.0            # per backend call
+    slow_timeout_s: float = 90.0       # per call that may think first (deliberate, sample, extract)
     retries: int = 4                   # on 429 / 5xx / timeouts
     group_size: int = 15               # options per call for big picks (<= backend top_logprobs cap)
     max_top_logprobs: int = 20         # vLLM's default --max-logprobs
     api_keys: frozenset[str] = frozenset()  # empty = no auth (only allowed on localhost)
+    chat_url: str | None = None        # full chat-completions URL, for servers not at {backend_url}/v1/...
+    key_header: str = "Authorization"  # header for backend_api_key: Bearer, or the bare key in any other header
+
+    @property
+    def completions_url(self) -> str:
+        from .hosts import chat_url
+        return chat_url(self.backend_url, self.chat_url)
+
+    @property
+    def backend_headers(self) -> dict:
+        from .hosts import headers
+        return headers(self.backend_api_key, self.key_header, self.backend_url)
 
     def resolve(self, name: str | None) -> ModelSpec | None:
         return self.models.get(name or self.default_model or "")
@@ -85,6 +99,43 @@ def _warn_ignored_mode_env(models: dict[str, "ModelSpec"], path: str | os.PathLi
         pass  # no models declared here; discover_settings() will use them
 
 
+def default_concurrency(url: str, models: "dict[str, ModelSpec] | None" = None) -> int:
+    """16 for a server on this machine or LAN. On a hosted API, 4 checks at a time, where 16 parallel calls mostly
+    buy 429s. A check in mode "sample" is `samples` calls, and they all go out at once so that voting costs tokens
+    but not latency: 4 checks x samples calls."""
+    from .hosts import is_hosted
+    if not is_hosted(url):
+        return 16
+    votes = max((m.samples for m in (models or {}).values() if m.mode == "sample"), default=1)
+    return 4 * max(1, votes)
+
+
+def _truthy(v: str) -> bool:
+    return v.strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def env_model_options() -> dict:
+    """ModelSpec fields set from the environment, for a model that is not declared in a hunch.toml:
+      HUNCH_CONSTRAINED   0 = the backend returns logprobs but ignores structured_outputs (hosted APIs)
+      HUNCH_EXTRA_BODY    a JSON object sent with every request, replacing the default extra_body
+      HUNCH_SAMPLES       votes per check in mode "sample"
+    `python -m hunch probe` prints the values to use for a backend."""
+    out: dict = {}
+    if os.environ.get("HUNCH_CONSTRAINED"):
+        out["constrained"] = _truthy(os.environ["HUNCH_CONSTRAINED"])
+    if os.environ.get("HUNCH_EXTRA_BODY"):
+        try:
+            extra = json.loads(os.environ["HUNCH_EXTRA_BODY"])
+        except json.JSONDecodeError as e:
+            raise ValueError(f"HUNCH_EXTRA_BODY is not JSON: {e}") from e
+        if not isinstance(extra, dict):
+            raise ValueError("HUNCH_EXTRA_BODY must be a JSON object")
+        out["extra_body"] = extra
+    if os.environ.get("HUNCH_SAMPLES"):
+        out["samples"] = int(os.environ["HUNCH_SAMPLES"])
+    return out
+
+
 def load_settings(path: str | os.PathLike | None = None) -> Settings:
     raw: dict = {}
     path = path or os.environ.get("HUNCH_CONFIG") or ("hunch.toml" if pathlib.Path("hunch.toml").exists() else None)
@@ -100,10 +151,17 @@ def load_settings(path: str | os.PathLike | None = None) -> Settings:
                              "set mode = \"deliberate\" (or \"auto\"), or remove effort")
     models = {n: (replace(m, extra_body={**m.extra_body, "reasoning_effort": m.effort}) if m.effort else m)
               for n, m in models.items()}
-    if not models and os.environ.get("HUNCH_BACKEND_MODEL"):
-        models = {"default": ModelSpec(name="default", backend_model=os.environ["HUNCH_BACKEND_MODEL"],
-                                       debias=os.environ.get("HUNCH_DEBIAS", "0") == "1")}
     _warn_ignored_mode_env(models, path)
+    if not models and os.environ.get("HUNCH_BACKEND_MODEL"):
+        # a model declared by environment alone: HUNCH_MODE / HUNCH_EFFORT apply here, as in discover_settings
+        opts = env_model_options()
+        if os.environ.get("HUNCH_MODE"):
+            opts["mode"] = os.environ["HUNCH_MODE"]
+        if os.environ.get("HUNCH_EFFORT"):
+            opts["extra_body"] = {**opts.get("extra_body", {"reasoning_effort": "none"}),
+                                  "reasoning_effort": os.environ["HUNCH_EFFORT"]}
+        models = {"default": ModelSpec(name="default", backend_model=os.environ["HUNCH_BACKEND_MODEL"],
+                                       debias=os.environ.get("HUNCH_DEBIAS", "0") == "1", **opts)}
     svc = raw.get("service", {})
     backend = raw.get("backend", {})
     default_model = os.environ.get("HUNCH_DEFAULT_MODEL", svc.get("default_model")) or (next(iter(models)) if models else None)
@@ -111,16 +169,19 @@ def load_settings(path: str | os.PathLike | None = None) -> Settings:
         raise ValueError(f"default_model {default_model!r} is not one of the configured models {sorted(models)}")
     keys = os.environ.get("HUNCH_API_KEYS", ",".join(svc.get("api_keys", [])))
     group_size = int(svc.get("group_size", 15))
-    max_top = int(backend.get("max_top_logprobs", 20))
+    max_top = int(os.environ.get("HUNCH_MAX_TOP_LOGPROBS") or backend.get("max_top_logprobs", 20))
+    # HUNCH_BACKEND_* > hunch.toml > the agent's own LLM variables > localhost
+    url = api_root(os.environ.get("HUNCH_BACKEND_URL") or backend.get("url") or _first(URL_VARS) or "http://localhost:8000")
     return Settings(
-        # HUNCH_BACKEND_* > hunch.toml > the agent's own LLM variables > localhost
-        backend_url=api_root(os.environ.get("HUNCH_BACKEND_URL") or backend.get("url")
-                             or _first(URL_VARS) or "http://localhost:8000"),
+        backend_url=url,
         backend_api_key=os.environ.get("HUNCH_BACKEND_KEY") or backend.get("api_key") or _first(KEY_VARS),
         models=models,
         default_model=default_model,
-        max_concurrency=int(os.environ.get("HUNCH_CONCURRENCY", svc.get("max_concurrency", 16))),
-        timeout_s=float(svc.get("timeout_s", 30.0)),
+        max_concurrency=int(os.environ.get("HUNCH_CONCURRENCY") or svc.get("max_concurrency") or default_concurrency(url, models)),
+        timeout_s=float(os.environ.get("HUNCH_TIMEOUT") or svc.get("timeout_s", 30.0)),
+        slow_timeout_s=float(os.environ.get("HUNCH_SLOW_TIMEOUT") or svc.get("slow_timeout_s", 90.0)),
+        chat_url=os.environ.get("HUNCH_CHAT_URL") or backend.get("chat_url"),
+        key_header=os.environ.get("HUNCH_KEY_HEADER") or backend.get("key_header", "Authorization"),
         retries=int(svc.get("retries", 4)),
         group_size=min(group_size, max_top),
         max_top_logprobs=max_top,
@@ -156,10 +217,12 @@ def api_root(url: str) -> str:
 
 def served_models(url: str, key: str | None, timeout: float = 15.0) -> list[str]:
     import httpx
-    headers = {"Authorization": f"Bearer {key}"} if key else {}
-    r = httpx.get(f"{url}/v1/models", headers=headers, timeout=timeout)
+
+    from .hosts import headers, model_ids, models_url
+    r = httpx.get(models_url(url, os.environ.get("HUNCH_CHAT_URL")),
+                  headers=headers(key, os.environ.get("HUNCH_KEY_HEADER") or "Authorization", url), timeout=timeout)
     r.raise_for_status()
-    return [m["id"] for m in r.json().get("data", [])]
+    return model_ids(r.json())
 
 
 def discover_settings(base_url: str | None = None, api_key: str | None = None,
@@ -190,8 +253,14 @@ def discover_settings(base_url: str | None = None, api_key: str | None = None,
     mode = os.environ.get("HUNCH_MODE") or ("sample" if no_logprobs else "auto")
     # a hosted API may refuse vLLM's fields; in sample mode send only what the caller asked for
     extra = ({"reasoning_effort": effort} if effort else {}) if mode == "sample" else {"reasoning_effort": effort or "none"}
-    spec = ModelSpec(name=os.environ.get("HUNCH_MODEL_NAME", "default"), backend_model=backend_model,
-                     extra_body=extra, mode=mode, samples=int(os.environ.get("HUNCH_SAMPLES", "7")))
+    opts = {"extra_body": extra, **env_model_options()}
+    spec = ModelSpec(name=os.environ.get("HUNCH_MODEL_NAME", "default"), backend_model=backend_model, mode=mode, **opts)
+    max_top = int(os.environ.get("HUNCH_MAX_TOP_LOGPROBS") or 20)
     return Settings(backend_url=url, backend_api_key=key, models={spec.name: spec}, default_model=spec.name,
-                    max_concurrency=int(os.environ.get("HUNCH_CONCURRENCY", "16")),
+                    max_concurrency=int(os.environ.get("HUNCH_CONCURRENCY") or default_concurrency(url, {spec.name: spec})),
+                    timeout_s=float(os.environ.get("HUNCH_TIMEOUT") or 30.0),
+                    slow_timeout_s=float(os.environ.get("HUNCH_SLOW_TIMEOUT") or 90.0),
+                    group_size=min(15, max_top), max_top_logprobs=max_top,
+                    chat_url=os.environ.get("HUNCH_CHAT_URL") or None,
+                    key_header=os.environ.get("HUNCH_KEY_HEADER") or "Authorization",
                     api_keys=frozenset(k.strip() for k in os.environ.get("HUNCH_API_KEYS", "").split(",") if k.strip()))

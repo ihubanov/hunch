@@ -55,9 +55,9 @@ Everything from 1.x works unchanged; 2.0 adds to the response and adds endpoints
 | Every result | kind-specific fields | + `answer` and `probability`; `answer: null` under `min_probability` |
 | Extraction | — | `POST /v1/extract`, `hunch.extract()`: typed, grounded fields with offsets and probabilities |
 | Streaming | — | `WS /v1/stream`, `hunch.astream()`: re-judge as text arrives, report flips |
-| Backends | vLLM-style (constrained choice + logprobs) | + any OpenAI-compatible chat API (mode `sample`) |
+| Backends | vLLM-style (constrained choice + logprobs) | + any OpenAI-compatible chat API (mode `sample`); hosted logprob APIs (2.2); `probe` and host quirks (2.3) |
 | Thinking | per model (`mode`) | + per request: `reasoning: off / on / auto`; `auto` thinks only when unsure (2.1) |
-| MCP | `judge` | `judge`, `extract` |
+| MCP | `judge` | `judge`, `extract`, `probe` (2.3) |
 
 The one behaviour change: zero-config discovery used to refuse an endpoint known to return no logprobs
 (`api.anthropic.com`); it now uses it in mode `sample`.
@@ -127,10 +127,75 @@ explicitly asks for money back. Hunch reports that uncertainty instead of guessi
 | Backend | How Hunch runs | Status |
 | --- | --- | --- |
 | Self-hosted [vLLM](https://github.com/vllm-project/vllm), or llama.cpp's `llama-server` | one token, read off the logprobs, answer constrained to your options | **Proven.** The one-token benchmarks in this README ran on vLLM; `llama-server` runs in our own deployments |
-| Hosted chat APIs with no token logprobs, such as Claude's API, directly or through OpenRouter | mode [`sample`](#backends-without-logprobs): a few votes per decision, probability = vote share. Chosen automatically for `api.anthropic.com`; elsewhere set `HUNCH_MODE=sample` | **Works, coarser and costlier.** Measured on Claude Haiku 5.5 via OpenRouter (below) |
-| Hosted APIs that return logprobs but can't constrain the answer (OpenRouter, …) | one token with `constrained = false`: only your options' probabilities are read and renormalised; an answer outside them fails as `off_label` | **Works.** Qualified through OpenRouter (see [Hosted logprob APIs](#hosted-logprob-apis)) |
+| Hosted APIs that return logprobs but can't constrain the answer: OpenRouter, OpenAI, Together | one token with `constrained = false`: only your options' probabilities are read and renormalised; an answer outside them fails as `off_label`. Thinking models run [deliberate](#deliberate-mode) | **Works.** Qualified on OpenRouter, OpenAI and Together (see [Hosted logprob APIs](#hosted-logprob-apis)); whether a given model qualifies is the model's business |
+| Hosted chat APIs with no token logprobs, such as Claude's API, directly or through OpenRouter | mode [`sample`](#backends-without-logprobs): a few votes per decision, probability = vote share. Chosen automatically for `api.anthropic.com`; elsewhere set `HUNCH_MODE=sample` | **Works, coarser and costlier.** Claude Opus 5.5, Sonnet 5.5 and Haiku 5.5 all qualify direct (see [below](#backends-without-logprobs)) |
+
+Not sure which kind you have? [`python -m hunch probe`](#probe-a-backend) tells you.
 
 Inside a coding CLI, see [Zero-config](#zero-config-library-cli-mcp) for which settings the CLI passes on.
+
+### Probe a backend
+
+`python -m hunch probe` makes a few tiny calls (3–15, cents at most) and tells you which kind of backend you have,
+how Hunch should run on it, and the settings to use:
+
+```text
+$ HUNCH_BACKEND_URL=https://api.openai.com/v1 HUNCH_BACKEND_MODEL=gpt-4.1-mini HUNCH_BACKEND_KEY=... python -m hunch probe
+
+  constraint enforced:  no  (structured_outputs refused by name)
+  logprobs:             yes  (top_logprobs up to 20, label mass 1.0)
+  thinks first:         no
+  refused fields:       reasoning_effort, structured_outputs (left out from now on)
+
+mode: one_token  - logprobs come back but the answer is not enforced; answers are read from the allowed labels in top_logprobs  (5 calls)
+
+settings:
+  HUNCH_MODE=one_token
+  HUNCH_CONSTRAINED=0
+  HUNCH_MAX_TOP_LOGPROBS=20
+  HUNCH_EXTRA_BODY='{}'
+```
+
+It picks the first row that fits:
+
+| The backend… | Mode | Cost per check |
+| --- | --- | --- |
+| enforces the answer and returns logprobs; the model answers first | `one_token` | 1 call, 1 token |
+| returns logprobs but doesn't enforce the answer; the model answers first | `one_token` with `constrained = false` | 1 call, 1 token |
+| returns logprobs; the model thinks first | `deliberate` (the verdict is the last option token it writes; enforced when the backend can) | 1 call, up to `think_budget` tokens |
+| anything else, if a plain reply names the right option | `sample` | `samples` calls (7) |
+| otherwise | `unsupported` | — |
+
+`--json` prints the same as a `hunch.probe/1` object, for programs that probe once and cache the verdict (key it by
+backend URL, model and Hunch version). The same probe is the MCP tool `probe`, `GET /v1/probe?model=` on the
+server, and `hunch.probe()` in Python. The JSON fields are listed in [`hunch/probe.py`](hunch/probe.py).
+
+The probe says whether Hunch *can run* on a backend; [`qualify`](#qualify-your-model-first) says whether the
+model's answers are *good enough*. Run both when you choose a model.
+
+**Hosted quirks Hunch handles for you.** Every call goes through one place
+([`hunch/hosts.py`](hunch/hosts.py)), so these apply to checks, probes, `selftest` and `qualify` alike:
+
+- **A field the backend refuses by name** (`structured_outputs`, `reasoning_effort`, `temperature`, …) is dropped
+  and the call resent at once; the backend model is not sent it again. A refused `structured_outputs` switches that
+  model to reading answers from `top_logprobs`, with the `off_label` guard.
+- **OpenRouter:** `provider.require_parameters = true` is added (otherwise calls can land on providers that drop
+  logprobs), and thinking is switched off with OpenRouter's own `reasoning = {enabled = false}`.
+- **Anthropic:** no `temperature` / `top_p` / `top_k` (current API versions refuse them); `x-api-key` is sent for
+  its model list.
+- **OpenAI:** `max_completion_tokens` instead of `max_tokens`.
+- **Google** (`…/v1beta/openai`): the chat path without `/v1`. Anything else unusual, such as Azure: set
+  `HUNCH_CHAT_URL` to the full chat-completions URL and `HUNCH_KEY_HEADER=api-key`.
+- **Model lists** in either shape: `{"data": [...]}` or a bare list (Together).
+- **Streaming-only models** (Together's passthrough models answer `streaming_required`): the call is resent as a
+  stream and folded back into one response, logprobs included; the model is streamed from then on.
+- **A one-token cap refused outright** (OpenAI's GPT-5 family: "Could not finish the message because max_tokens…"):
+  the cap is raised to 16 for that model. Hunch still reads only the first token.
+- **An answer outside your options** (`off_label`) is asked once more before the call fails; a stray token (one
+  model answered a single comma once in 720 calls) does not fail a check.
+- **Hosted APIs run 4 checks at a time by default** instead of 16. In mode `sample` every vote of those checks goes
+  out at once (4 × `samples` calls), so voting costs tokens, not latency. Calls that may think get
+  `slow_timeout_s` (90 s) instead of 30 s.
 
 ## Qualify your model first
 
@@ -353,6 +418,39 @@ same models on self-hosted vLLM:
 Both qualify. The first run found that OpenRouter occasionally answers without logprobs (1–4 calls in 720); those
 calls are now retried.
 
+Direct to the provider (2.3.0, full `qualify`, each model configured as `python -m hunch probe` recommends):
+
+| Provider | Model | Mode | Accuracy at 0.9 | ECE | Flips | Verdict |
+| --- | --- | --- | --- | --- | --- | --- |
+| OpenAI | gpt-5.5 | one token, unconstrained, thinking off | 99.6% | 0.012 | 0.0% | **qualified** |
+| OpenAI | gpt-5.4 | one token, unconstrained, thinking off | 99.6% | 0.004 | 0.0% | **qualified** (top-1 logprob only, below) |
+| OpenAI | gpt-4.1 | one token, unconstrained | 99.2% | 0.013 | 0.4% | **qualified** |
+| OpenAI | gpt-4.1-mini | one token, unconstrained | 90.0% | 0.118 | 0.8% | qualified, just |
+| OpenAI | gpt-5.4-mini | `sample`, 7 votes, `reasoning_effort = "low"` | 98.8% | 0.002 | 0.0% | **qualified** |
+| OpenAI | gpt-5.4-mini | one token, thinking off | 83.8% | 0.200 | 3.3% | not qualified: falls for look-alikes |
+| Together | Qwen3.7-Plus | one token, unconstrained | 100.0% | 0.008 | 0.4% | **qualified** |
+| Together | Qwen3.7-Max | one token, unconstrained, streamed | 99.2% | 0.012 | 0.0% | **qualified** |
+| Together | Qwen3.8-Flash | one token, unconstrained | 100.0% | 0.037 | 1.7% | not qualified: one `off_label` reply (a comma) in 720 calls, before the retry existed |
+| Together | Kimi-K3 | one token, unconstrained | 99.2% | 0.049 | 0.0% | **qualified** |
+| Together | Nemotron-3.5-Super | one token, unconstrained | 94.2% | 0.129 | 0.8% | qualified |
+| Together | DeepSeek-V4.1-Flash | deliberate | 98.3% | 0.017 | 0.4% | **qualified** |
+| Together | DeepSeek-V4.1-Flash | one token | 85.8% | 0.200 | 1.7% | not qualified, as self-hosted |
+| Together | Qwen3.5-9B | one token | 90.4% | 0.267 | 0.4% | not qualified: overconfident |
+
+OpenAI refuses `structured_outputs` by name; Hunch drops it on the first refusal and reads answers from
+`top_logprobs`. Its GPT-5 models return logprobs only with thinking off (`reasoning_effort = "none"`), and then
+gpt-5.4 and gpt-5.5 return only the top-1 token (gpt-5.4-mini returns 2), so their probabilities are close to 0 or 1:
+fine for a confident model, coarse for borderline cases. gpt-5.4-mini answers too fast with thinking off and calls
+look-alikes "yes" (48 of 160 "no" cases, 38 of them confidently); with a little thinking in `sample` mode it
+qualifies easily, at the cost of 7 calls per check. Together returns
+OpenAI-style `top_logprobs` (its docs' `logprobs: 1` form is refused now). Its passthrough models (Qwen3.7-Max,
+Qwen3.8-Flash) need the organisation's prompt-storage and passthrough-model settings turned on, and only stream;
+many other models are dedicated-endpoint only. The probe reports each of these errors.
+
+DeepSeek on Together is the case [Deliberate mode](#deliberate-mode) describes: its thinking-off answers are badly
+calibrated, and thinking first fixes them. It works without an enforced answer: the verdict is the last option
+token the model writes, and Together returns that token's logprobs.
+
 ### Backends without logprobs
 
 Hosted chat APIs that return no token logprobs can't be read the usual way. Set `mode = "sample"` for the model in
@@ -368,6 +466,21 @@ returns an empty reply; a direct answer still stops after one token.
 
 The cost is real: probabilities move in 1/`samples` steps and every vote costs a full prompt (use the provider's
 prompt caching). Prefer a logprob backend when you have one. vLLM-only request fields are not sent in this mode.
+
+Measured direct on Claude's API (2.3.0, full `qualify`: 240 labelled pairs, two runs and a question-only run,
+7 votes each, about 5,000 calls per model):
+
+| Model | `think_budget` | Accuracy at 0.9 | ECE | Flips | Question only | Verdict |
+| --- | --- | --- | --- | --- | --- | --- |
+| Claude Opus 5.5 | 4096 | 99.2% | 0.009 | 0.0% | 97.9% | **qualified** |
+| Claude Sonnet 5.5 | 4096 | 99.2% | 0.011 | 0.0% | 87.5% | **qualified** |
+| Claude Haiku 5.5 | 2048 (default) | 98.3% | 0.025 | 0.8% | 80.8% | **qualified** |
+
+"Question only" is the bare question without the definitions that name the look-alikes; Opus 5.5 barely needs
+them. Claude models may think before answering even when told not to, so keep `think_budget` at its default or
+above: at 256 a few Haiku replies were cut off empty and failed as `no_label` (the error now says so). Calls on
+Claude's API carry no `temperature` (current API versions refuse it), so the vote spread comes from the default
+temperature.
 
 Measured through OpenRouter on Claude Haiku 5.5 (no logprobs), 5 votes per decision: the selftest's 12 cases
 12/12 (twice), its extraction case 5/5, and [multistep_decisions](#multistep-decisions-public-benchmark)
@@ -405,7 +518,7 @@ The same engine runs three more ways, all using **the LLM the agent already has*
 | --- | --- | --- |
 | Library | `from hunch import judge, ajudge` | Python agents and scripts: in-process, no server |
 | One-shot CLI | `python -m hunch judge '<json>'` (or `-` for stdin) | shells, other languages, cron |
-| MCP server | `python -m hunch mcp` (stdio, `judge` and `extract` tools) | agents that call tools: the agent starts it on demand |
+| MCP server | `python -m hunch mcp` (stdio, `judge`, `extract` and `probe` tools) | agents that call tools: the agent starts it on demand |
 | HTTP server | `python -m hunch` | a shared service; unchanged, and now also zero-config |
 
 Settings are found in this order: arguments (`judge(..., base_url=, api_key=, model=)`), a `hunch.toml`, then the
@@ -864,10 +977,15 @@ effort = "low"
 | `HUNCH_BACKEND_URL`, `HUNCH_BACKEND_KEY` | vLLM server and optional bearer key |
 | `HUNCH_BACKEND_MODEL` | Quick single-model setup without a TOML file (exposed as `default`) |
 | `HUNCH_DEFAULT_MODEL` | Overrides `service.default_model` |
-| `HUNCH_CONCURRENCY` | Simultaneous backend calls. Keep it modest on a shared server |
+| `HUNCH_CONCURRENCY` | Simultaneous backend calls (default 16; for a hosted API 4, or 4 × `samples` in mode `sample`). Keep it modest on a shared server |
 | `HUNCH_BACKEND_MODEL` + `mode` in `hunch.toml` | `one_token` (default), `deliberate`, `auto` — see [Deliberate mode](#deliberate-mode) — or `sample` (no logprobs; see [Backends without logprobs](#backends-without-logprobs)) |
 | `HUNCH_SAMPLES` | Votes per decision in mode `sample` (default 7), for a discovered model |
-| `HUNCH_MODE`, `HUNCH_EFFORT` | Override `mode` / `effort` for a model **discovered from the environment**. Ignored (with a warning) when a config file declares models — set them in the file instead |
+| `HUNCH_CONSTRAINED` | `0` for a backend that returns logprobs but ignores `structured_outputs` (`constrained = false`) |
+| `HUNCH_EXTRA_BODY` | JSON object sent with every request, replacing the default `{"reasoning_effort": "none"}` |
+| `HUNCH_MAX_TOP_LOGPROBS` | The backend's `top_logprobs` cap (default 20) |
+| `HUNCH_CHAT_URL`, `HUNCH_KEY_HEADER` | Full chat-completions URL and key header, for backends not at `{url}/v1/chat/completions` with a Bearer key (Azure) |
+| `HUNCH_TIMEOUT`, `HUNCH_SLOW_TIMEOUT` | Per-call timeouts: 30 s, and 90 s for calls that may think first |
+| `HUNCH_MODE`, `HUNCH_EFFORT` | Set `mode` / `effort` for a model **declared by the environment** (`HUNCH_BACKEND_MODEL` with no config file, or discovered). Ignored (with a warning) when a config file declares models — set them in the file instead |
 | `SSL_CERT_FILE` | CA bundle for a backend behind a private or self-signed CA, e.g. `/etc/ssl/certs/ca-certificates.crt` (Python doesn't use the system store by default) |
 | `HUNCH_API_KEYS` | Comma-separated bearer keys. Hunch **refuses** to listen beyond localhost without them (or `HUNCH_ALLOW_NOAUTH=1` behind an authenticating proxy) |
 

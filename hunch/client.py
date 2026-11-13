@@ -127,6 +127,20 @@ def extract(context: Any, fields: dict[str, Any], **kwargs: Any) -> dict:
     return _run(aextract(context, fields, **kwargs))
 
 
+async def aprobe(*, model: str | None = None, base_url: str | None = None, api_key: str | None = None,
+                 transport: httpx.AsyncBaseTransport | None = None) -> dict:
+    """Async version of probe()."""
+    from .probe import aprobe_settings
+    settings, spec = await _settings(base_url, api_key, model)
+    return await aprobe_settings(settings, spec, transport)
+
+
+def probe(**kwargs: Any) -> dict:
+    """What the caller's backend supports and how Hunch should run on it: the hunch.probe/1 dict
+    (see hunch.probe). A few small backend calls; cache the answer per (endpoint, model, hunch version)."""
+    return _run(aprobe(**kwargs))
+
+
 def _run(coro):
     try:
         asyncio.get_running_loop()

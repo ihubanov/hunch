@@ -17,7 +17,7 @@ from typing import Any
 
 import httpx
 
-from . import prompts
+from . import hosts, prompts
 from .config import ModelSpec, Settings
 
 MODES = ("one_token", "deliberate", "auto", "sample")
@@ -25,7 +25,7 @@ PROBE_MAX_TOKENS = 16   # enough to tell an answer from the start of a scratchpa
 # Values of `reasoning_effort` that mean "don't think". Dropped in deliberate mode; real effort levels
 # (low / high / max) are passed through, and "low" is often the best setting there — it can cut the
 # thinking to a few tokens without losing accuracy.
-THINKING_OFF_EFFORTS = ("none", "off", "disable", "disabled")
+THINKING_OFF_EFFORTS = hosts.THINKING_OFF_EFFORTS
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 DIGITS = "0123456789"
 MAX_LEVELS = len(DIGITS)
@@ -133,6 +133,94 @@ class Engine:
         self.client = client
         self.sem = asyncio.Semaphore(settings.max_concurrency)
         self._detected: dict[str, str] = {}   # model name -> resolved mode, for mode="auto"
+        # backend model -> request fields the backend refused by name (see hosts.rejected_field). Learnt on the
+        # first refusal and not sent again by this engine.
+        self.dropped: dict[str, set[str]] = {}
+        self.calls = 0                          # backend POSTs made, retries included
+        self.streaming: set[str] = set()        # backend models that only answer streamed calls
+        self.min_tokens: dict[str, int] = {}    # backend model -> smallest max_tokens it accepts, when above 1
+
+    def unconstrained(self, spec: ModelSpec) -> bool:
+        """Answers are read from top_logprobs without a constraint: configured so, or the backend refused it."""
+        return not spec.constrained or "structured_outputs" in self.dropped.get(spec.backend_model, ())
+
+    async def send(self, spec: ModelSpec, body: dict, retry_if=None) -> dict:
+        """POST one chat completion and return its JSON. Every backend call goes through here.
+
+        - host quirks are applied (hosts.adapt) and fields this backend refused before are left out;
+        - a 400/422 that names a droppable field drops it and resends at once (not counted as a retry);
+        - 429 / 5xx / timeouts are retried with backoff; `retry_if(data)` returning a reason retries a 200 too;
+        - other errors map to HunchError codes.
+        A call that may think (max_tokens above PROBE_MAX_TOKENS) gets slow_timeout_s.
+        """
+        dropped = self.dropped.setdefault(spec.backend_model, set())
+        url = self.s.completions_url
+        long_call = (body.get("max_tokens") or 0) > PROBE_MAX_TOKENS
+        timeout = max(self.s.timeout_s, self.s.slow_timeout_s) if long_call else self.s.timeout_s
+        body = {k: v for k, v in hosts.adapt(url, body).items() if k not in dropped}
+        if spec.backend_model in self.streaming:
+            body.update(stream=True, stream_options={"include_usage": True})
+        tok_key = "max_completion_tokens" if "max_completion_tokens" in body else "max_tokens"
+        floor = self.min_tokens.get(spec.backend_model)
+        if floor and (body.get(tok_key) or 0) < floor:
+            body[tok_key] = floor
+        headers = self.s.backend_headers
+        last = "no attempt"
+        attempt, drops = 0, 0
+        while attempt <= self.s.retries:
+            if attempt:
+                await asyncio.sleep(min(0.5 * 2 ** (attempt - 1), 4.0))
+            try:
+                async with self.sem:
+                    self.calls += 1
+                    r = await self.client.post(url, json=body, headers=headers, timeout=timeout)
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                last = f"{type(e).__name__}: {e}"
+                attempt += 1
+                continue
+            if r.status_code == 429 or r.status_code >= 500:
+                last = f"backend HTTP {r.status_code}"
+                if r.status_code == 429:
+                    try:
+                        await asyncio.sleep(min(float(r.headers.get("retry-after", "1")), 10.0))
+                    except ValueError:
+                        await asyncio.sleep(1.0)
+                attempt += 1
+                continue
+            if r.status_code >= 400:
+                text = r.text[:400]
+                if hosts.requires_streaming(r.status_code, text) and not body.get("stream"):
+                    self.streaming.add(spec.backend_model)
+                    body.update(stream=True, stream_options={"include_usage": True})
+                    drops += 1
+                    continue
+                if hosts.needs_more_tokens(r.status_code, text) and (body.get(tok_key) or 0) < hosts.MIN_TOKENS_RETRY:
+                    self.min_tokens[spec.backend_model] = hosts.MIN_TOKENS_RETRY
+                    body[tok_key] = hosts.MIN_TOKENS_RETRY
+                    drops += 1
+                    continue
+                field = hosts.rejected_field(r.status_code, text, body)
+                if field and drops < len(hosts.DROPPABLE):
+                    dropped.add(field)
+                    body.pop(field)
+                    drops += 1
+                    continue
+                if _has_images(body) and any(k in text.lower() for k in IMAGE_REFUSALS):
+                    raise HunchError(400, "images_not_supported",
+                                     f"model {spec.name!r} ({spec.backend_model}) does not accept images: {text[:200]}")
+                if any(k in text.lower() for k in ("context length", "maximum context", "too long")):
+                    raise HunchError(413, "context_too_long", "context plus question exceed the backend model's context window")
+                raise HunchError(502, "backend_error", f"backend HTTP {r.status_code}: {text}")
+            data = hosts.collect_stream(r.text) if body.get("stream") else r.json()
+            if body.get("stream") and data.get("error"):
+                raise HunchError(502, "backend_error", f"backend stream error: {str(data['error'])[:300]}")
+            why = retry_if(data) if retry_if else None
+            if why:
+                last = why
+                attempt += 1
+                continue
+            return data
+        raise HunchError(503, "backend_unavailable", last)
 
     @property
     def max_options(self) -> int:
@@ -163,68 +251,34 @@ class Engine:
             return await self._sample_probs(spec, msgs, labels)
         deliberate = mode == "deliberate"
         body = self._request(spec, msgs, labels, deliberate)
-        headers = {"Authorization": f"Bearer {self.s.backend_api_key}"} if self.s.backend_api_key else {}
-        last = "no attempt"
-        for attempt in range(self.s.retries + 1):
-            if attempt:
-                await asyncio.sleep(min(0.5 * 2 ** (attempt - 1), 4.0))
-            try:
-                async with self.sem:
-                    r = await self.client.post(f"{self.s.backend_url}/v1/chat/completions", json=body,
-                                               headers=headers, timeout=self.s.timeout_s)
-            except (httpx.TimeoutException, httpx.TransportError) as e:
-                last = f"{type(e).__name__}: {e}"
-                continue
-            if r.status_code == 429 or r.status_code >= 500:
-                last = f"backend HTTP {r.status_code}"
-                if r.status_code == 429:
-                    try:
-                        await asyncio.sleep(min(float(r.headers.get("retry-after", "1")), 10.0))
-                    except ValueError:
-                        await asyncio.sleep(1.0)
-                continue
-            if r.status_code >= 400:
-                text = r.text[:400]
-                if _has_images(body) and any(k in text.lower() for k in IMAGE_REFUSALS):
-                    raise HunchError(400, "images_not_supported",
-                                     f"model {spec.name!r} ({spec.backend_model}) does not accept images: {text[:200]}")
-                if any(k in text.lower() for k in ("context length", "maximum context", "too long")):
-                    raise HunchError(413, "context_too_long", "context plus question exceed the backend model's context window")
-                raise HunchError(502, "backend_error", f"backend HTTP {r.status_code}: {text}")
-            data = r.json()
-            if not spec.constrained and not ((data.get("choices") or [{}])[0].get("logprobs") or {}).get("content"):
-                # A router in front of several providers (constrained=false backends) occasionally serves a
-                # call from one that drops logprobs. The model never answered here, so this is a retry, not a guess.
-                last = "backend returned no logprobs"
-                continue
+        if self.unconstrained(spec):
+            body.pop("structured_outputs", None)
+
+        def no_logprobs(data: dict) -> str | None:
+            # A router in front of several providers occasionally serves a call from one that drops logprobs.
+            # The model never answered here, so this is a retry, not a guess. Only for unconstrained backends:
+            # on vLLM a missing logprob is a real error and is reported as one.
+            if self.unconstrained(spec) and not ((data.get("choices") or [{}])[0].get("logprobs") or {}).get("content"):
+                return "backend returned no logprobs"
+            return None
+
+        data = await self.send(spec, body, retry_if=no_logprobs)
+        # unconstrained() is read again: the backend may have refused structured_outputs during this call
+        try:
             return self._parse(data, labels, deliberate,
-                               min_label_mass=None if spec.constrained else spec.min_label_mass)
-        raise HunchError(503, "backend_unavailable", last)
+                               min_label_mass=spec.min_label_mass if self.unconstrained(spec) else None)
+        except HunchError as e:
+            if e.code != "off_label":
+                raise
+            # Hosted APIs are not repeatable even at temperature 0: Qwen3.8-Flash on Together once answered "," in
+            # 720 calls and never again in the next 720. Ask once more; a model that really answers off the
+            # options does it again and fails as before.
+            data = await self.send(spec, body, retry_if=no_logprobs)
+            return self._parse(data, labels, deliberate, min_label_mass=spec.min_label_mass)
 
     async def post_chat(self, spec: ModelSpec, body: dict) -> dict:
         """One chat completion with the retry / error mapping every Hunch call uses. Returns the JSON body."""
-        headers = {"Authorization": f"Bearer {self.s.backend_api_key}"} if self.s.backend_api_key else {}
-        last = "no attempt"
-        for attempt in range(self.s.retries + 1):
-            if attempt:
-                await asyncio.sleep(min(0.5 * 2 ** (attempt - 1), 4.0))
-            try:
-                async with self.sem:
-                    r = await self.client.post(f"{self.s.backend_url}/v1/chat/completions", json=body,
-                                               headers=headers, timeout=self.s.timeout_s)
-            except (httpx.TimeoutException, httpx.TransportError) as e:
-                last = f"{type(e).__name__}: {e}"
-                continue
-            if r.status_code == 429 or r.status_code >= 500:
-                last = f"backend HTTP {r.status_code}"
-                continue
-            if r.status_code >= 400:
-                text = r.text[:400]
-                if any(k in text.lower() for k in ("context length", "maximum context", "too long")):
-                    raise HunchError(413, "context_too_long", "context plus question exceed the backend model's context window")
-                raise HunchError(502, "backend_error", f"backend HTTP {r.status_code}: {text}")
-            return r.json()
-        raise HunchError(503, "backend_unavailable", last)
+        return await self.send(spec, body)
 
     async def _sample_probs(self, spec: ModelSpec, msgs: list[dict], labels: str) -> tuple[dict[str, float], Usage]:
         """Mode "sample": no logprobs, so ask `samples` times at temperature > 0 and count the votes.
@@ -242,6 +296,8 @@ class Engine:
         replies = await asyncio.gather(*[self.post_chat(spec, body) for _ in range(max(1, spec.samples))])
         votes = {lab: 0 for lab in labels}
         usage = Usage()
+        unread: list[str] = []
+        cut = 0                                  # replies stopped by max_tokens before any visible answer
         for data in replies:
             u = data.get("usage") or {}
             usage.add(Usage(u.get("prompt_tokens", 0) or 0, u.get("completion_tokens", 0) or 0, 1))
@@ -252,9 +308,19 @@ class Engine:
             lab = read_label(text, labels)
             if lab is not None:
                 votes[lab] += 1
+            else:
+                unread.append(text)
+                cut += not text.strip() and (data["choices"][0].get("finish_reason") == "length")
         n = sum(votes.values())
+        if n == 0 and cut:
+            raise HunchError(502, "no_label", f"{cut} of {spec.samples} sampled replies were cut off at "
+                                              f"think_budget={spec.think_budget} tokens before answering (the model "
+                                              "thinks first on some questions); raise think_budget")
         if n == 0:
-            raise HunchError(502, "no_label", f"none of {spec.samples} sampled replies named one of {list(labels)}")
+            # say what the model wrote: an empty reply, a refusal and a label buried mid-sentence need different fixes
+            seen = "; ".join(repr(t[:160]) for t in unread[:2]) or "no text"
+            raise HunchError(502, "no_label", f"none of {spec.samples} sampled replies named one of {list(labels)}; "
+                                              f"replies were e.g. {seen}")
         return {k: v / n for k, v in votes.items()}, usage
 
     async def mode_for(self, spec: ModelSpec) -> str:
@@ -296,16 +362,10 @@ class Engine:
         body = {"model": spec.backend_model,
                 "messages": [{"role": "user", "content": "Reply with exactly one word: yes"}],
                 "max_tokens": PROBE_MAX_TOKENS, "temperature": 0, **extra}
-        headers = {"Authorization": f"Bearer {self.s.backend_api_key}"} if self.s.backend_api_key else {}
         try:
-            async with self.sem:
-                r = await self.client.post(f"{self.s.backend_url}/v1/chat/completions", json=body,
-                                           headers=headers, timeout=self.s.timeout_s)
-            if r.status_code != 200:
-                return False        # can't tell; assume the cheap mode rather than force the expensive one
-            msg = r.json()["choices"][0].get("message") or {}
-        except (httpx.TimeoutException, httpx.TransportError):
-            return False
+            msg = (await self.send(spec, body))["choices"][0].get("message") or {}
+        except (HunchError, KeyError, IndexError, TypeError):
+            return False            # can't tell; assume the cheap mode rather than force the expensive one
         if (msg.get("reasoning") or msg.get("reasoning_content") or "").strip():
             return True             # 0.29.0 uses `reasoning`; older builds use `reasoning_content`
         return not (msg.get("content") or "").strip().lower().lstrip('"\'*_ ').startswith("yes")

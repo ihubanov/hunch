@@ -399,7 +399,7 @@ def test_library_extract_and_mcp_tool(monkeypatch, tmp_path):
     out = hunch.extract(SOURCE, FIELDS, base_url="http://b.test", model="org/m", transport=transport, now="2026-11-03")
     assert out["results"]["budget"]["value"]["amount"] == 450
     tools = mcp.handle({"method": "tools/list"})["tools"]
-    assert [t["name"] for t in tools] == ["judge", "extract"]
+    assert [t["name"] for t in tools] == ["judge", "extract", "probe"]
 
 
 # ------------------------------------------------------------------ reasoning: off / on / auto

@@ -139,7 +139,7 @@ async def qualify_model(engine: Engine, client: httpx.AsyncClient, name: str, se
         r.reasons.append(f"backend does not serve {spec.backend_model!r}")
         return r
     r.mode = await engine.mode_for(spec)
-    problem = await probe_constraint(client, s, spec, headers, deliberate=(r.mode == "deliberate"))
+    problem = None if r.mode == "sample" else await probe_constraint(engine, spec, deliberate=(r.mode == "deliberate"))
     if problem:
         r.reasons.append(problem)
         r.unavailable = problem.startswith("constraint probe: HTTP 5") or "unreachable" in problem
@@ -204,7 +204,7 @@ async def run(names: list[str], criteria: Criteria, quick: bool, json_path: str 
     if not names:
         print("no models configured: create hunch.toml or set HUNCH_BACKEND_MODEL")
         return 2
-    headers = {"Authorization": f"Bearer {s.backend_api_key}"} if s.backend_api_key else {}
+    headers = s.backend_headers
     reports = []
     async with httpx.AsyncClient() as client:
         engine = Engine(s, client)
@@ -223,6 +223,8 @@ async def run(names: list[str], criteria: Criteria, quick: bool, json_path: str 
             # A model that can think gets a second chance in deliberate mode, and both are reported so the
             # trade-off is visible. Two reasons: it has no non-thinking mode at all (GLM-5.3), or it has
             # one that answers worse than it thinks (DeepSeek-V4.1-Flash: ECE 0.19 -> 0.02).
+            # Unconstrained backends too: the verdict is then the last option token after the thinking
+            # (DeepSeek-V4.1-Flash on Together: one token ECE 0.20, deliberate 0.017).
             if report.can_think and report.mode == "one_token" and not report.qualified and not report.unavailable:
                 spec = s.resolve(name)
                 why = "it thinks first" if report.opens_scratchpad else "it can think, and its one-token answers failed"

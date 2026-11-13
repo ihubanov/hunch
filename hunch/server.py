@@ -160,6 +160,15 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
         except (WebSocketDisconnect, RuntimeError):
             pass   # the client left; nothing to tell it
 
+    @app.get("/v1/probe", dependencies=[Depends(auth)])
+    async def probe_backend(request: Request, model: str | None = None):
+        """What the backend supports for a configured model, and the mode to run it in (hunch.probe/1)."""
+        from .probe import probe
+        spec = settings.resolve(model)
+        if spec is None:
+            raise HunchError(400, "unknown_model", f"unknown model {model!r}; configured: {sorted(settings.models)}")
+        return await probe(request.app.state.engine, spec)
+
     @app.get("/v1/models", dependencies=[Depends(auth)])
     async def models(request: Request):
         engine: Engine = request.app.state.engine
@@ -180,11 +189,13 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
     async def health(request: Request):
         engine: Engine = request.app.state.engine
         try:
-            headers = {"Authorization": f"Bearer {settings.backend_api_key}"} if settings.backend_api_key else {}
-            r = await engine.client.get(f"{settings.backend_url}/v1/models", headers=headers, timeout=5)
+            from .hosts import models_url
+            r = await engine.client.get(models_url(settings.backend_url, settings.chat_url),
+                                        headers=settings.backend_headers, timeout=5)
             if r.status_code != 200:
                 return JSONResponse({"ok": False, "error": f"backend /v1/models returned HTTP {r.status_code}"}, status_code=503)
-            served = {m["id"] for m in r.json().get("data", [])}
+            from .hosts import model_ids
+            served = set(model_ids(r.json()))
         except Exception as e:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": repr(e)}, status_code=503)
         status = {s.name: s.backend_model in served for s in settings.models.values()}

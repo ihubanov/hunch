@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hunch.config import ModelSpec, Settings
-from hunch.engine import confidence
+from hunch.engine import Engine, confidence
 from hunch.server import create_app
 
 STAR = "★"  # the fake backend prefers the option / level / group whose line contains this
@@ -300,7 +300,7 @@ def test_probe_retries_transient_errors():
     async def go():
         transport, state = fake_backend(fail_first=2, status=504)
         async with httpx.AsyncClient(transport=transport) as client:
-            return await probe_constraint(client, SETTINGS, SETTINGS.models["fast"], {}), state
+            return await probe_constraint(Engine(SETTINGS, client), SETTINGS.models["fast"]), state
 
     problem, state = asyncio.run(go())
     assert problem is None and state["calls"] == 3
@@ -505,7 +505,7 @@ def test_constraint_probe_gives_a_thinking_model_room():
 
     async def go(spec, deliberate):
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            return await probe_constraint(client, SETTINGS, spec, {}, deliberate=deliberate)
+            return await probe_constraint(Engine(SETTINGS, client), spec, deliberate=deliberate)
 
     spec = replace(SETTINGS.models["fast"], mode="deliberate", extra_body={"reasoning_effort": "high"})
     assert asyncio.run(go(spec, True)) is None                # passes, with room to think
@@ -865,7 +865,7 @@ def test_mcp_server_handshake_list_and_call(clean_env):
     replies = {r["id"]: r for r in map(json.loads, out.getvalue().splitlines())}
     assert set(replies) == {1, 2, 3, 4, 5}                                  # no reply to the notification
     assert replies[1]["result"]["serverInfo"]["name"] == "hunch" and "tools" in replies[1]["result"]["capabilities"]
-    assert [t["name"] for t in replies[2]["result"]["tools"]] == ["judge", "extract"]
+    assert [t["name"] for t in replies[2]["result"]["tools"]] == ["judge", "extract", "probe"]
     call = replies[3]["result"]
     assert not call.get("isError") and call["structuredContent"]["results"]["a"]["kind"] == "yesno"
     assert replies[4]["result"]["isError"] is True and "invalid_request" in replies[4]["result"]["content"][0]["text"]
@@ -977,7 +977,7 @@ def test_probe_unconstrained_needs_only_logprobs():
     async def go():
         transport, state = unconstrained_backend(first="A", top=[{"token": "A", "logprob": math.log(0.9)}])
         async with httpx.AsyncClient(transport=transport) as hc:
-            return await probe_constraint(hc, UNCONSTRAINED, UNCONSTRAINED.models["hosted"], {}), state
+            return await probe_constraint(Engine(UNCONSTRAINED, hc), UNCONSTRAINED.models["hosted"]), state
 
     problem, state = asyncio.run(go())
     assert problem is None and "structured_outputs" not in state["bodies"][0]

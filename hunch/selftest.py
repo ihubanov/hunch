@@ -46,33 +46,25 @@ CASES = [  # (context, check, expected): bool for yesno (p >= 0.5), key for pick
 ]
 
 
-async def probe_constraint(client: httpx.AsyncClient, s, spec, headers: dict, deliberate: bool = False) -> str | None:
+async def probe_constraint(engine: Engine, spec, deliberate: bool = False) -> str | None:
     """None if the backend enforces structured_outputs and returns logprobs for this model, else the problem.
 
     In deliberate mode the model thinks first, so the probe must allow it the same budget: with
     max_tokens=2 a thinking model spends both tokens thinking and looks unconstrained.
     """
-    if not spec.constrained:
-        return await _probe_logprobs(client, s, spec, headers, deliberate)
+    if engine.unconstrained(spec):
+        return await _probe_logprobs(engine, spec, deliberate)
     body = {"model": spec.backend_model, "messages": [{"role": "user", "content": "Write the word hello and nothing else."}],
             "structured_outputs": {"choice": ["A", "B"]}, "logprobs": True, "top_logprobs": 2,
             "max_tokens": spec.think_budget if deliberate else 2, "temperature": 0,
             **effective_extra_body(spec, deliberate)}
-    r = None
-    for attempt in range(s.retries + 1):  # transient 429 / 5xx / timeouts are retried like normal checks
-        if attempt:
-            await asyncio.sleep(min(0.5 * 2 ** (attempt - 1), 4.0))
-        try:
-            r = await client.post(f"{s.backend_url}/v1/chat/completions", json=body, headers=headers, timeout=60)
-        except (httpx.TimeoutException, httpx.TransportError):
-            continue
-        if r.status_code != 429 and r.status_code < 500:
-            break
-    if r is None:
-        return "constraint probe: backend unreachable"
-    if r.status_code != 200:
-        return f"constraint probe: HTTP {r.status_code} {r.text[:200]}"
-    d = r.json()
+    try:
+        d = await engine.send(spec, body)
+    except HunchError as e:
+        return _probe_problem("constraint probe", e)
+    if engine.unconstrained(spec):
+        # the backend refused the constraint by name; the engine now reads answers from top_logprobs instead
+        return await _probe_logprobs(engine, spec, deliberate)
     content = (d["choices"][0]["message"].get("content") or "").strip()
     if content not in ("A", "B"):
         return f"structured_outputs NOT enforced (got {content!r}); answers would be unconstrained"
@@ -81,37 +73,36 @@ async def probe_constraint(client: httpx.AsyncClient, s, spec, headers: dict, de
     return None
 
 
-async def _probe_logprobs(client: httpx.AsyncClient, s, spec, headers: dict, deliberate: bool) -> str | None:
+def _probe_problem(what: str, e: HunchError) -> str:
+    if e.code == "backend_unavailable":
+        return f"{what}: backend unreachable ({e.message})"
+    return f"{what}: {e.message[:200]}"
+
+
+async def _probe_logprobs(engine: Engine, spec, deliberate: bool) -> str | None:
     """constrained = false: the backend is not asked to constrain the answer, only to return logprobs.
     Whether the model keeps to the labels on its own is measured by the run itself (off_label errors)."""
     body = {"model": spec.backend_model,
             "messages": [{"role": "user", "content": "Reply with exactly one letter, A or B: which letter comes first in the alphabet?"}],
             "logprobs": True, "top_logprobs": 2, "max_tokens": spec.think_budget if deliberate else 1, "temperature": 0,
             **effective_extra_body(spec, deliberate)}
-    r = None
-    for attempt in range(s.retries + 1):
-        if attempt:
-            await asyncio.sleep(min(0.5 * 2 ** (attempt - 1), 4.0))
-        try:
-            r = await client.post(f"{s.backend_url}/v1/chat/completions", json=body, headers=headers, timeout=60)
-        except (httpx.TimeoutException, httpx.TransportError):
-            continue
-        if r.status_code != 429 and r.status_code < 500:
-            break
-    if r is None:
-        return "logprobs probe: backend unreachable"
-    if r.status_code != 200:
-        return f"logprobs probe: HTTP {r.status_code} {r.text[:200]}"
-    if not (r.json()["choices"][0].get("logprobs") or {}).get("content"):
-        return "no logprobs returned"
-    return None
+    try:
+        d = await engine.send(spec, body, retry_if=lambda d: None if (d["choices"][0].get("logprobs") or {}).get("content")
+                              else "backend returned no logprobs")
+    except HunchError as e:
+        if e.message == "backend returned no logprobs":
+            return "no logprobs returned"
+        return _probe_problem("logprobs probe", e)
+    return None if (d["choices"][0].get("logprobs") or {}).get("content") else "no logprobs returned"
 
 
-async def served_models(client: httpx.AsyncClient, s, headers: dict) -> set[str]:
-    r = await client.get(f"{s.backend_url}/v1/models", headers=headers, timeout=10)
+async def served_models(client: httpx.AsyncClient, s, headers: dict | None = None) -> set[str]:
+    from .hosts import models_url
+    r = await client.get(models_url(s.backend_url, s.chat_url), headers=s.backend_headers, timeout=10)
     if r.status_code != 200:
         raise RuntimeError(f"backend /v1/models returned HTTP {r.status_code} (check HUNCH_BACKEND_KEY / [backend] api_key)")
-    return {m["id"] for m in r.json().get("data", [])}
+    from .hosts import model_ids
+    return set(model_ids(r.json()))
 
 
 def _correct(check: dict, result: dict, expected) -> bool:
@@ -177,9 +168,8 @@ async def run(names: list[str]) -> int:
     async with httpx.AsyncClient() as client:
         engine = Engine(s, client)
         print(f"backend: {s.backend_url}")
-        headers = {"Authorization": f"Bearer {s.backend_api_key}"} if s.backend_api_key else {}
         try:
-            served = await served_models(client, s, headers)
+            served = await served_models(client, s)
         except Exception as e:  # noqa: BLE001
             print(f"FAIL backend /v1/models: {e}")
             return 1
@@ -200,12 +190,12 @@ async def run(names: list[str]) -> int:
             if mode == "sample":
                 print(f"info mode sample: no logprobs; each answer is {spec.samples} votes")
             else:
-                problem = await probe_constraint(client, s, spec, headers, deliberate=(mode == "deliberate"))
+                problem = await probe_constraint(engine, spec, deliberate=(mode == "deliberate"))
                 if problem:
                     print(f"FAIL {problem}")
                     failures += 1
                     continue
-                print("ok   structured_outputs enforced and logprobs returned" if spec.constrained
+                print("ok   structured_outputs enforced and logprobs returned" if not engine.unconstrained(spec)
                       else "ok   logprobs returned (constrained = false: answers read from top_logprobs)")
             t0 = time.perf_counter()
             correct = []

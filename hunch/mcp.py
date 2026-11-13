@@ -15,7 +15,7 @@ import sys
 from typing import Any, TextIO
 
 from . import __version__
-from .client import extract, judge
+from .client import extract, judge, probe
 from .engine import HunchError
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -82,6 +82,17 @@ EXTRACT_TOOL = {
 }
 
 
+PROBE_TOOL = {
+    "name": "probe",
+    "title": "Backend capability probe",
+    "description": (
+        "Check what the configured LLM backend supports (enforced answers, token logprobs, thinking) and which "
+        "Hunch mode fits it: one_token, deliberate, sample or unsupported. Returns the hunch.probe/1 object, "
+        "including the environment settings to use. A few small backend calls; run it once per backend and model."),
+    "inputSchema": {"type": "object", "properties": {"model": {"type": "string"}}},
+}
+
+
 def _reply(out: TextIO, msg_id: Any, result: dict | None = None, error: dict | None = None) -> None:
     msg = {"jsonrpc": "2.0", "id": msg_id}
     msg.update({"error": error} if error else {"result": result})
@@ -99,13 +110,15 @@ def handle(msg: dict) -> dict | None:
     if method == "ping":
         return {}
     if method == "tools/list":
-        return {"tools": [JUDGE_TOOL, EXTRACT_TOOL]}
+        return {"tools": [JUDGE_TOOL, EXTRACT_TOOL, PROBE_TOOL]}
     if method == "tools/call":
-        if params.get("name") not in ("judge", "extract"):
+        if params.get("name") not in ("judge", "extract", "probe"):
             raise ValueError(f"unknown tool {params.get('name')!r}")
         args = params.get("arguments") or {}
         try:
-            if params["name"] == "extract":
+            if params["name"] == "probe":
+                out = probe(model=args.get("model"))
+            elif params["name"] == "extract":
                 out = extract(args.get("context", ""), args.get("fields"), model=args.get("model"),
                               min_probability=args.get("min_probability"), now=args.get("now"))
             else:

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hunch"
-version = "2.2.0"
+version = "2.3.0"
 description = "Calibrated decisions, grounded extraction and streaming decisions from your own LLMs, read straight off the logprobs"
 readme = "README.md"
 license = "MIT"
